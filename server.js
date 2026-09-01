@@ -107,10 +107,10 @@ app.post("/api/ai", async (req, res) => {
   } catch (error) {
     console.error("[HAHARI AI ERROR]", error);
 
-    return res.status(500).json({
-      success: false,
-      error: "Failed to generate AI response."
-    });
+return res.status(500).json({
+  success: false,
+  error: error.message || String(error)
+});
   }
 });
 
