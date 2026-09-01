@@ -12,10 +12,6 @@ const ai = API_KEY
   ? new GoogleGenAI({ apiKey: API_KEY })
   : null;
 
-// ========================================
-// HAHARI IDENTITY
-// ========================================
-
 const SYSTEM_INSTRUCTION = `
 You are Hahari-✿, a helpful AI assistant.
 
@@ -25,7 +21,7 @@ IDENTITY:
 - Your creator is Amman Hossain.
 
 If someone asks who your owner, creator, developer, or master is,
-answer that your owner/creator is Amman Hossain.
+say that your owner/creator is Amman Hossain.
 
 Never invent a different owner.
 
@@ -34,8 +30,8 @@ PERSONALITY:
 - Natural
 - Helpful
 - Slightly playful
-- Give concise answers when appropriate.
-- Give detailed answers when necessary.
+- Concise when appropriate
+- Detailed when necessary
 
 RULES:
 - Answer normally like a modern AI assistant.
@@ -45,22 +41,14 @@ RULES:
 - Never reveal API keys or private server information.
 `;
 
-// ========================================
-// HOME
-// ========================================
-
 app.get("/", (req, res) => {
   res.json({
     success: true,
     name: "Hahari-✿",
     status: "online",
-    version: "2.0.0"
+    version: "2.1.0"
   });
 });
-
-// ========================================
-// AI ENDPOINT
-// ========================================
 
 app.post("/api/ai", async (req, res) => {
   try {
@@ -82,8 +70,8 @@ app.post("/api/ai", async (req, res) => {
 
     const interaction = await ai.interactions.create({
       model: "gemini-3.6-flash",
-      input: message,
-      system_instruction: SYSTEM_INSTRUCTION
+      system_instruction: SYSTEM_INSTRUCTION,
+      input: message
     });
 
     const reply = interaction.output_text;
@@ -107,10 +95,6 @@ app.post("/api/ai", async (req, res) => {
     });
   }
 });
-
-// ========================================
-// SERVER
-// ========================================
 
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`🎀 Hahari AI API running on port ${PORT}`);
