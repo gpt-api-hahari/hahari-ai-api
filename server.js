@@ -26,6 +26,14 @@ const MODEL =
   process.env.GEMINI_MODEL ||
   "gemini-3.5-flash-lite";
 
+// -----------------------------------------------------
+// IMAGE MODEL
+// -----------------------------------------------------
+
+const IMAGE_MODEL =
+  process.env.GEMINI_IMAGE_MODEL ||
+  "gemini-3.1-flash-image";
+
 const OWNER_UID =
   "100051329442110";
 
@@ -325,6 +333,287 @@ IMPORTANT:
 
 
 // =====================================================
+// DETECT IMAGE REQUEST
+//
+// This is intentionally NOT triggered by every
+// "make/create/generate" sentence.
+//
+// Example:
+//
+// make a girl wearing a suit       -> IMAGE
+// create a picture of a cat        -> IMAGE
+// draw an anime girl               -> IMAGE
+// generate a landscape             -> IMAGE
+//
+// make me a schedule               -> TEXT
+// create a plan for studying       -> TEXT
+// generate a JavaScript function  -> TEXT
+//
+// =====================================================
+
+function isImageRequest(
+  question
+) {
+
+  const text =
+    String(question || "")
+      .trim()
+      .toLowerCase();
+
+
+  if (!text)
+    return false;
+
+
+  // Explicit image words are always image requests.
+
+  const explicitImageWords = [
+    "image",
+    "picture",
+    "photo",
+    "photograph",
+    "portrait",
+    "illustration",
+    "artwork",
+    "wallpaper",
+    "poster",
+    "drawing",
+    "art"
+  ];
+
+
+  if (
+    explicitImageWords.some(
+      word =>
+        new RegExp(
+          `\\b${word}\\b`,
+          "i"
+        ).test(text)
+    )
+  ) {
+
+    return true;
+  }
+
+
+  // Common visual subjects.
+
+  const visualSubjects = [
+
+    "girl",
+    "boy",
+    "woman",
+    "man",
+    "person",
+    "people",
+    "character",
+    "anime",
+    "waifu",
+    "husband",
+    "wife",
+
+    "cat",
+    "dog",
+    "animal",
+    "bird",
+    "dragon",
+    "wolf",
+
+    "car",
+    "bike",
+    "motorcycle",
+
+    "house",
+    "building",
+    "city",
+    "landscape",
+    "mountain",
+    "beach",
+    "forest",
+    "sunset",
+    "moon",
+    "galaxy",
+    "space",
+
+    "logo",
+    "banner",
+    "thumbnail",
+    "icon",
+    "sticker",
+    "scene"
+  ];
+
+
+  const hasVisualSubject =
+    visualSubjects.some(
+      word =>
+        new RegExp(
+          `\\b${word}\\b`,
+          "i"
+        ).test(text)
+    );
+
+
+  // Image creation verbs.
+
+  const creationVerbs = [
+    "make",
+    "create",
+    "generate",
+    "draw",
+    "render",
+    "design",
+    "paint"
+  ];
+
+
+  const hasCreationVerb =
+    creationVerbs.some(
+      word =>
+        new RegExp(
+          `\\b${word}\\b`,
+          "i"
+        ).test(text)
+    );
+
+
+  // "make a girl", "create an anime character", etc.
+
+  if (
+    hasCreationVerb &&
+    hasVisualSubject
+  ) {
+
+    return true;
+  }
+
+
+  // More explicit visual phrases.
+
+  const visualPhrases = [
+
+    "generate an image",
+    "generate a picture",
+    "generate a photo",
+
+    "create an image",
+    "create a picture",
+    "create a photo",
+
+    "make an image",
+    "make a picture",
+    "make a photo",
+
+    "draw me",
+    "draw a",
+    "draw an",
+
+    "show me a picture",
+    "show me an image",
+
+    "make me a wallpaper",
+    "create a wallpaper",
+    "generate a wallpaper",
+
+    "make me a poster",
+    "create a poster",
+    "generate a poster",
+
+    "make me a logo",
+    "create a logo",
+    "generate a logo"
+  ];
+
+
+  return visualPhrases.some(
+    phrase =>
+      text.includes(phrase)
+  );
+}
+
+
+// =====================================================
+// GENERATE IMAGE
+// =====================================================
+
+async function generateImage({
+  question
+}) {
+
+  if (!ai) {
+
+    throw new Error(
+      "GEMINI_API_KEY is not configured."
+    );
+  }
+
+
+  console.log(
+    "[HAHARI IMAGE] Generating image..."
+  );
+
+
+  const interaction =
+    await ai.interactions.create({
+
+      model:
+        IMAGE_MODEL,
+
+      input:
+        question,
+
+      response_format: {
+
+        type:
+          "image",
+
+        mime_type:
+          "image/png",
+
+        aspect_ratio:
+          "1:1",
+
+        image_size:
+          "1K"
+
+      }
+
+    });
+
+
+  const generatedImage =
+    interaction?.output_image;
+
+
+  if (
+    !generatedImage ||
+    !generatedImage.data
+  ) {
+
+    throw new Error(
+      "Gemini returned no image."
+    );
+  }
+
+
+  return {
+
+    type:
+      "image",
+
+    imageData:
+      generatedImage.data,
+
+    mimeType:
+      generatedImage.mime_type ||
+      generatedImage.mimeType ||
+      "image/png"
+
+  };
+}
+
+
+// =====================================================
 // GENERATE AI
 // =====================================================
 
@@ -342,6 +631,72 @@ async function generateAI({
     throw new Error(
       "GEMINI_API_KEY is not configured."
     );
+  }
+
+
+  // ---------------------------------------------------
+  // IMAGE REQUEST
+  // ---------------------------------------------------
+
+  if (
+    isImageRequest(question)
+  ) {
+
+    const image =
+      await generateImage({
+        question
+      });
+
+
+    // -------------------------------------------------
+    // Keep image requests in conversation memory.
+    //
+    // We NEVER store the image itself.
+    // Only the user's prompt and a small marker.
+    // -------------------------------------------------
+
+    const history =
+      await getMemory(
+        threadID,
+        userID
+      );
+
+
+    const updatedHistory = [
+
+      ...history,
+
+      {
+        role:
+          "user",
+
+        text:
+          question
+      },
+
+      {
+        role:
+          "model",
+
+        text:
+          "[Generated an image for this request.]"
+      }
+
+    ];
+
+
+    await saveMemory(
+
+      threadID,
+
+      userID,
+
+      updatedHistory
+
+    );
+
+
+    return image;
   }
 
 
@@ -559,6 +914,9 @@ app.get(
       model:
         MODEL,
 
+      imageModel:
+        IMAGE_MODEL,
+
       uptime:
         Math.floor(
           process.uptime()
@@ -690,6 +1048,60 @@ app.post(
 
         });
 
+
+      // -------------------------------------------------
+      // IMAGE RESPONSE
+      // -------------------------------------------------
+
+      if (
+        reply &&
+        reply.type ===
+        "image"
+      ) {
+
+        return res.json({
+
+          success:
+            true,
+
+          model:
+            IMAGE_MODEL,
+
+          type:
+            "image",
+
+          imageData:
+            reply.imageData,
+
+          mimeType:
+            reply.mimeType,
+
+          user:
+            {
+              id:
+                userID,
+
+              name:
+                userName,
+
+              isOwner
+            },
+
+          memory:
+            true,
+
+          responseTime:
+            Date.now() -
+            started
+
+        });
+
+      }
+
+
+      // -------------------------------------------------
+      // ORIGINAL TEXT RESPONSE
+      // -------------------------------------------------
 
       return res.json({
 
