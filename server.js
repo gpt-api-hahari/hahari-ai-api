@@ -8,6 +8,11 @@ app.use(express.json({
   limit: "1mb"
 }));
 
+
+// =====================================================
+// CONFIG
+// =====================================================
+
 const PORT =
   process.env.PORT || 10000;
 
@@ -21,34 +26,46 @@ const MODEL =
   process.env.GEMINI_MODEL ||
   "gemini-3.5-flash-lite";
 
-const IMAGE_MODEL =
-  process.env.GEMINI_IMAGE_MODEL ||
-  "gemini-3.1-flash-image";
-
 const OWNER_UID =
   "100051329442110";
+
+
+// =====================================================
+// GEMINI
+// =====================================================
 
 let ai = null;
 
 if (GEMINI_API_KEY) {
+
   ai =
     new GoogleGenAI({
       apiKey:
         GEMINI_API_KEY
     });
+
 }
+
+
+// =====================================================
+// MONGODB
+// =====================================================
 
 let mongoClient = null;
 let db = null;
 let memoryCollection = null;
 
 async function connectMongo() {
+
   if (!MONGODB_URI) {
+
     console.warn(
       "[MONGODB] MONGODB_URI is not configured."
     );
+
     return false;
   }
+
 
   mongoClient =
     new MongoClient(
@@ -59,7 +76,9 @@ async function connectMongo() {
       }
     );
 
+
   await mongoClient.connect();
+
 
   db =
     mongoClient.db(
@@ -67,10 +86,12 @@ async function connectMongo() {
       "hahari_ai"
     );
 
+
   memoryCollection =
     db.collection(
       "conversation_memory"
     );
+
 
   await memoryCollection.createIndex(
     {
@@ -81,6 +102,7 @@ async function connectMongo() {
     }
   );
 
+
   console.log(
     "[MONGODB] Connected successfully."
   );
@@ -88,50 +110,84 @@ async function connectMongo() {
   return true;
 }
 
+
+// =====================================================
+// MEMORY KEY
+//
+// Each user gets separate memory inside each thread.
+//
+// Example:
+//
+// Group A + User 123
+// Group A + User 456
+//
+// They do NOT share the same conversation.
+//
+// =====================================================
+
 function getMemoryKey(
   threadID,
   userID
 ) {
+
   return (
     `${String(threadID)}:${String(userID)}`
   );
 }
 
+
+// =====================================================
+// GET MEMORY
+// =====================================================
+
 async function getMemory(
   threadID,
   userID
 ) {
+
   if (!memoryCollection)
     return [];
+
 
   const memoryKey =
     getMemoryKey(
       threadID,
       userID
     );
+
 
   const document =
     await memoryCollection.findOne({
       memoryKey
     });
 
+
   if (
     !document ||
     !Array.isArray(document.messages)
   ) {
+
     return [];
   }
 
+
   return document.messages;
 }
+
+
+// =====================================================
+// SAVE MEMORY
+// =====================================================
 
 async function saveMemory(
   threadID,
   userID,
   messages
 ) {
+
   if (!memoryCollection)
     return;
+
 
   const memoryKey =
     getMemoryKey(
@@ -139,15 +195,23 @@ async function saveMemory(
       userID
     );
 
+
+  // Keep the database memory reasonable.
+  // 20 messages = roughly 10 user/AI exchanges.
+
   const trimmed =
     messages.slice(-20);
 
+
   await memoryCollection.updateOne(
+
     {
       memoryKey
     },
+
     {
       $set: {
+
         threadID:
           String(threadID),
 
@@ -159,36 +223,55 @@ async function saveMemory(
 
         updatedAt:
           new Date()
+
       },
 
       $setOnInsert: {
+
         createdAt:
           new Date()
+
       }
+
     },
 
     {
       upsert:
         true
     }
+
   );
 }
+
+
+// =====================================================
+// CLEAR MEMORY
+// =====================================================
 
 async function deleteMemory(
   threadID,
   userID
 ) {
+
   if (!memoryCollection)
     return;
 
+
   await memoryCollection.deleteOne({
+
     memoryKey:
       getMemoryKey(
         threadID,
         userID
       )
+
   });
 }
+
+
+// =====================================================
+// BUILD SYSTEM PROMPT
+// =====================================================
 
 function buildSystemPrompt({
   userID,
@@ -197,10 +280,12 @@ function buildSystemPrompt({
   threadID,
   isGroup
 }) {
+
   const ownerText =
     isOwner
       ? "YES. This user is your owner and creator."
       : "NO. This user is not your owner.";
+
 
   return `
 You are Hahari AI, the AI assistant of Hahari Bot.
@@ -238,210 +323,10 @@ IMPORTANT:
 `.trim();
 }
 
-/*
- * Detect requests that are intended to CREATE an image.
- *
- * Examples that should return true:
- *
- * make a girl wearing a suit
- * create an anime girl
- * generate a cyberpunk city
- * draw a cat
- * render a futuristic car
- * make me a wallpaper
- * create an image of a woman
- * generate a picture of a house
- *
- * Normal questions such as:
- *
- * what is art?
- * who is that man?
- * how do I draw a cat?
- * what is a picture?
- *
- * should remain text requests.
- */
-function isImageRequest(question) {
-  const text =
-    String(question || "")
-      .trim()
-      .toLowerCase();
 
-  if (!text)
-    return false;
-
-  /*
-   * Explicit image words.
-   */
-  const imageWords =
-    /\b(image|picture|photo|photograph|artwork|illustration|portrait|wallpaper|poster|logo|thumbnail|icon)\b/i;
-
-  /*
-   * Strong image-generation verbs.
-   */
-  const generationVerbs =
-    /\b(make|create|generate|draw|paint|render|design|illustrate|produce)\b/i;
-
-  /*
-   * Common visual subjects.
-   *
-   * These allow:
-   * "make a girl"
-   * "create an anime character"
-   * "draw a dragon"
-   * "generate a car"
-   */
-  const visualSubjects =
-    /\b(girl|boy|man|woman|person|people|character|anime|manga|cat|dog|animal|bird|dragon|car|vehicle|house|building|city|landscape|scene|room|dress|outfit|suit|robot|monster|princess|king|queen|warrior|logo|poster|wallpaper)\b/i;
-
-  /*
-   * 1. Explicit image request.
-   *
-   * Example:
-   * "make an image of a girl"
-   */
-  if (
-    generationVerbs.test(text) &&
-    imageWords.test(text)
-  ) {
-    return true;
-  }
-
-  /*
-   * 2. Generation verb + visual subject.
-   *
-   * Example:
-   * "make a girl wearing a suit"
-   * "create an anime character"
-   * "draw a dragon"
-   */
-  if (
-    generationVerbs.test(text) &&
-    visualSubjects.test(text)
-  ) {
-    return true;
-  }
-
-  /*
-   * 3. Direct image phrases.
-   *
-   * Example:
-   * "an image of a girl"
-   * "a picture of a car"
-   * "a portrait of an anime girl"
-   *
-   * This requires an image noun, so normal questions
-   * containing "girl" or "car" won't trigger it.
-   */
-  const directImagePhrase =
-    /\b(image|picture|photo|photograph|artwork|illustration|portrait|wallpaper|poster|logo|thumbnail|icon)\b\s+(of|for|showing|featuring)\b/i;
-
-  if (
-    directImagePhrase.test(text)
-  ) {
-    return true;
-  }
-
-  /*
-   * 4. "show me an image/picture/photo"
-   */
-  const showImage =
-    /\b(show|give|send)\b.*\b(image|picture|photo|photograph)\b/i;
-
-  if (
-    showImage.test(text)
-  ) {
-    return true;
-  }
-
-  return false;
-}
-
-async function generateImage({
-  question
-}) {
-  if (!ai) {
-    throw new Error(
-      "GEMINI_API_KEY is not configured."
-    );
-  }
-
-  console.log(
-    "[HAHARI IMAGE] Generating image..."
-  );
-
-  console.log(
-    "[HAHARI IMAGE] Model:",
-    IMAGE_MODEL
-  );
-
-  const response =
-    await ai.models.generateContent({
-      model:
-        IMAGE_MODEL,
-
-      contents:
-        question,
-
-      config: {
-        responseModalities: [
-          "IMAGE"
-        ],
-
-        responseFormat: {
-          image: {
-            aspectRatio:
-              "1:1",
-
-            imageSize:
-              "1K",
-
-            mimeType:
-              "image/jpeg"
-          }
-        }
-      }
-    });
-
-  const parts =
-    response
-      ?.candidates?.[0]
-      ?.content?.parts;
-
-  if (!Array.isArray(parts)) {
-    throw new Error(
-      "Gemini returned no image parts."
-    );
-  }
-
-  for (
-    const part of parts
-  ) {
-    if (
-      part?.inlineData?.data
-    ) {
-      console.log(
-        "[HAHARI IMAGE] Image generated successfully."
-      );
-
-      return {
-        type:
-          "image",
-
-        imageData:
-          part.inlineData.data,
-
-        mimeType:
-          part.inlineData.mimeType ||
-          "image/jpeg"
-      };
-    }
-  }
-
-  throw new Error(
-    "Gemini returned no image data."
-  );
-}
+// =====================================================
+// GENERATE AI
+// =====================================================
 
 async function generateAI({
   question,
@@ -451,86 +336,40 @@ async function generateAI({
   isOwner,
   isGroup
 }) {
+
   if (!ai) {
+
     throw new Error(
       "GEMINI_API_KEY is not configured."
     );
   }
 
-  /*
-   * IMAGE REQUEST
-   *
-   * Image requests are intentionally handled
-   * separately from the normal text model.
-   */
-  if (
-    isImageRequest(
-      question
-    )
-  ) {
-    console.log(
-      "[HAHARI AI] Image request detected:",
-      question
-    );
 
-    const image =
-      await generateImage({
-        question
-      });
+  // ---------------------------------------------------
+  // Load persistent memory
+  // ---------------------------------------------------
 
-    const history =
-      await getMemory(
-        threadID,
-        userID
-      );
-
-    const updatedHistory = [
-      ...history,
-
-      {
-        role:
-          "user",
-
-        text:
-          question
-      },
-
-      {
-        role:
-          "model",
-
-        text:
-          "[Generated an image for this request.]"
-      }
-    ];
-
-    await saveMemory(
-      threadID,
-      userID,
-      updatedHistory
-    );
-
-    return image;
-  }
-
-  /*
-   * NORMAL TEXT AI
-   *
-   * Existing text generation remains unchanged.
-   */
   const history =
     await getMemory(
       threadID,
       userID
     );
 
+
+  // ---------------------------------------------------
+  // Build conversation
+  // ---------------------------------------------------
+
   const contents = [];
 
+
   contents.push({
+
     role:
       "user",
 
     parts: [
+
       {
         text:
           buildSystemPrompt({
@@ -540,13 +379,19 @@ async function generateAI({
             threadID,
             isGroup
           })
+
       }
+
     ]
+
   });
 
+
+  // Add previous conversation
   for (
     const item of history
   ) {
+
     if (
       !item ||
       !item.role ||
@@ -554,49 +399,77 @@ async function generateAI({
     )
       continue;
 
+
     contents.push({
+
       role:
         item.role,
 
       parts: [
+
         {
           text:
             item.text
         }
+
       ]
+
     });
+
   }
 
+
+  // Current question
   contents.push({
+
     role:
       "user",
 
     parts: [
+
       {
         text:
           question
       }
+
     ]
+
   });
+
+
+  // ---------------------------------------------------
+  // Gemini
+  // ---------------------------------------------------
 
   const response =
     await ai.models.generateContent({
+
       model:
         MODEL,
 
       contents
+
     });
+
 
   const answer =
     response?.text?.trim();
 
+
   if (!answer) {
+
     throw new Error(
       "Gemini returned an empty response."
     );
   }
 
+
+  // ---------------------------------------------------
+  // Save new conversation
+  // ---------------------------------------------------
+
   const updatedHistory = [
+
     ...history,
 
     {
@@ -614,27 +487,35 @@ async function generateAI({
       text:
         answer
     }
+
   ];
 
+
   await saveMemory(
+
     threadID,
+
     userID,
+
     updatedHistory
+
   );
 
-  return {
-    type:
-      "text",
 
-    reply:
-      answer
-  };
+  return answer;
 }
+
+
+// =====================================================
+// ROOT
+// =====================================================
 
 app.get(
   "/",
   (req, res) => {
+
     res.json({
+
       success:
         true,
 
@@ -643,14 +524,23 @@ app.get(
 
       version:
         "3.0.0"
+
     });
+
   }
 );
+
+
+// =====================================================
+// HEALTH
+// =====================================================
 
 app.get(
   "/health",
   (req, res) => {
+
     res.json({
+
       success:
         true,
 
@@ -669,57 +559,84 @@ app.get(
       model:
         MODEL,
 
-      imageModel:
-        IMAGE_MODEL,
-
       uptime:
         Math.floor(
           process.uptime()
         )
+
     });
+
   }
 );
+
+
+// =====================================================
+// AI
+// =====================================================
 
 app.post(
   "/api/ai",
   async (req, res) => {
+
     const started =
       Date.now();
 
+
     try {
+
       const {
+
         message,
+
         user,
+
         conversation
+
       } =
         req.body || {};
+
+
+      // -------------------------------------------------
+      // Validate
+      // -------------------------------------------------
 
       if (
         !message ||
         typeof message !==
         "string"
       ) {
+
         return res.status(400).json({
+
           success:
             false,
 
           error:
             "Missing message."
+
         });
+
       }
+
 
       const question =
         message.trim();
 
+
       if (!question) {
+
         return res.status(400).json({
+
           success:
             false,
 
           error:
             "Message cannot be empty."
+
         });
+
       }
+
 
       const userID =
         String(
@@ -727,11 +644,13 @@ app.post(
           "unknown"
         );
 
+
       const userName =
         String(
           user?.name ||
           "Unknown User"
         );
+
 
       const threadID =
         String(
@@ -739,48 +658,51 @@ app.post(
           "unknown"
         );
 
+
       const isOwner =
         userID ===
         OWNER_UID;
+
 
       const isGroup =
         conversation?.scope ===
         "group-user";
 
-      const result =
+
+      // -------------------------------------------------
+      // Generate
+      // -------------------------------------------------
+
+      const reply =
         await generateAI({
+
           question,
+
           userID,
+
           userName,
+
           threadID,
+
           isOwner,
+
           isGroup
+
         });
 
-      /*
-       * IMAGE RESPONSE
-       */
-      if (
-        result.type ===
-        "image"
-      ) {
-        return res.json({
-          success:
-            true,
 
-          type:
-            "image",
+      return res.json({
 
-          model:
-            IMAGE_MODEL,
+        success:
+          true,
 
-          imageData:
-            result.imageData,
+        model:
+          MODEL,
 
-          mimeType:
-            result.mimeType,
+        reply,
 
-          user: {
+        user:
+          {
             id:
               userID,
 
@@ -790,59 +712,29 @@ app.post(
             isOwner
           },
 
-          memory:
-            true,
-
-          responseTime:
-            Date.now() -
-            started
-        });
-      }
-
-      /*
-       * TEXT RESPONSE
-       */
-      return res.json({
-        success:
-          true,
-
-        type:
-          "text",
-
-        model:
-          MODEL,
-
-        reply:
-          result.reply,
-
-        user: {
-          id:
-            userID,
-
-          name:
-            userName,
-
-          isOwner
-        },
-
         memory:
           true,
 
         responseTime:
           Date.now() -
           started
+
       });
 
+
     } catch (error) {
+
       console.error(
         "[API ERROR]",
         error
       );
 
+
       const status =
         error?.status ||
         error?.response?.status ||
         500;
+
 
       return res.status(
         status >= 400 &&
@@ -850,6 +742,7 @@ app.post(
           ? status
           : 500
       ).json({
+
         success:
           false,
 
@@ -860,78 +753,116 @@ app.post(
         responseTime:
           Date.now() -
           started
+
       });
+
     }
+
   }
 );
+
+
+// =====================================================
+// CLEAR MEMORY
+// =====================================================
 
 app.post(
   "/api/ai/clear",
   async (req, res) => {
+
     try {
+
       const {
         userID,
         threadID
       } =
         req.body || {};
 
+
       if (
         !userID ||
         !threadID
       ) {
+
         return res.status(400).json({
+
           success:
             false,
 
           error:
             "userID and threadID are required."
+
         });
+
       }
+
 
       await deleteMemory(
         String(threadID),
         String(userID)
       );
 
+
       return res.json({
+
         success:
           true,
 
         message:
           "Conversation memory cleared."
+
       });
 
+
     } catch (error) {
+
       console.error(
         "[CLEAR ERROR]",
         error
       );
 
+
       return res.status(500).json({
+
         success:
           false,
 
         error:
           "Failed to clear memory."
+
       });
+
     }
+
   }
 );
+
+
+// =====================================================
+// START SERVER
+// =====================================================
 
 app.listen(
   PORT,
   async () => {
+
     console.log(
       `🎀 Hahari AI API V3 running on port ${PORT}`
     );
 
+
     try {
+
       await connectMongo();
+
     } catch (error) {
+
       console.error(
         "[MONGODB] Connection failed:",
         error.message
       );
+
     }
+
   }
 );
