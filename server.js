@@ -150,18 +150,23 @@ async function saveMemory(
       $set: {
         threadID:
           String(threadID),
+
         userID:
           String(userID),
+
         messages:
           trimmed,
+
         updatedAt:
           new Date()
       },
+
       $setOnInsert: {
         createdAt:
           new Date()
       }
     },
+
     {
       upsert:
         true
@@ -233,24 +238,123 @@ IMPORTANT:
 `.trim();
 }
 
+/*
+ * Detect requests that are intended to CREATE an image.
+ *
+ * Examples that should return true:
+ *
+ * make a girl wearing a suit
+ * create an anime girl
+ * generate a cyberpunk city
+ * draw a cat
+ * render a futuristic car
+ * make me a wallpaper
+ * create an image of a woman
+ * generate a picture of a house
+ *
+ * Normal questions such as:
+ *
+ * what is art?
+ * who is that man?
+ * how do I draw a cat?
+ * what is a picture?
+ *
+ * should remain text requests.
+ */
 function isImageRequest(question) {
   const text =
     String(question || "")
-      .toLowerCase()
-      .trim();
+      .trim()
+      .toLowerCase();
 
-  const imagePatterns = [
-    /\b(make|create|generate|draw|render|produce)\b.*\b(image|picture|photo|art|artwork|illustration|portrait)\b/i,
-    /\b(image|picture|photo|art|artwork|illustration|portrait)\b.*\b(make|create|generate|draw|render|produce)\b/i,
-    /\bgenerate\s+(a|an|the)?\s*(girl|boy|man|woman|person|character|anime|logo|poster|wallpaper)\b/i,
-    /\b(create|make|draw|render)\s+(a|an|the)?\s*(girl|boy|man|woman|person|character|anime|logo|poster|wallpaper)\b/i,
-    /\b(show|give)\s+me\s+(an?|the)?\s*(image|picture|photo)\b/i
-  ];
+  if (!text)
+    return false;
 
-  return imagePatterns.some(
-    pattern =>
-      pattern.test(text)
-  );
+  /*
+   * Explicit image words.
+   */
+  const imageWords =
+    /\b(image|picture|photo|photograph|artwork|illustration|portrait|wallpaper|poster|logo|thumbnail|icon)\b/i;
+
+  /*
+   * Strong image-generation verbs.
+   */
+  const generationVerbs =
+    /\b(make|create|generate|draw|paint|render|design|illustrate|produce)\b/i;
+
+  /*
+   * Common visual subjects.
+   *
+   * These allow:
+   * "make a girl"
+   * "create an anime character"
+   * "draw a dragon"
+   * "generate a car"
+   */
+  const visualSubjects =
+    /\b(girl|boy|man|woman|person|people|character|anime|manga|cat|dog|animal|bird|dragon|car|vehicle|house|building|city|landscape|scene|room|dress|outfit|suit|robot|monster|princess|king|queen|warrior|logo|poster|wallpaper)\b/i;
+
+  /*
+   * 1. Explicit image request.
+   *
+   * Example:
+   * "make an image of a girl"
+   */
+  if (
+    generationVerbs.test(text) &&
+    imageWords.test(text)
+  ) {
+    return true;
+  }
+
+  /*
+   * 2. Generation verb + visual subject.
+   *
+   * Example:
+   * "make a girl wearing a suit"
+   * "create an anime character"
+   * "draw a dragon"
+   */
+  if (
+    generationVerbs.test(text) &&
+    visualSubjects.test(text)
+  ) {
+    return true;
+  }
+
+  /*
+   * 3. Direct image phrases.
+   *
+   * Example:
+   * "an image of a girl"
+   * "a picture of a car"
+   * "a portrait of an anime girl"
+   *
+   * This requires an image noun, so normal questions
+   * containing "girl" or "car" won't trigger it.
+   */
+  const directImagePhrase =
+    /\b(image|picture|photo|photograph|artwork|illustration|portrait|wallpaper|poster|logo|thumbnail|icon)\b\s+(of|for|showing|featuring)\b/i;
+
+  if (
+    directImagePhrase.test(text)
+  ) {
+    return true;
+  }
+
+  /*
+   * 4. "show me an image/picture/photo"
+   */
+  const showImage =
+    /\b(show|give|send)\b.*\b(image|picture|photo|photograph)\b/i;
+
+  if (
+    showImage.test(text)
+  ) {
+    return true;
+  }
+
+  return false;
 }
 
 async function generateImage({
@@ -264,6 +368,11 @@ async function generateImage({
 
   console.log(
     "[HAHARI IMAGE] Generating image..."
+  );
+
+  console.log(
+    "[HAHARI IMAGE] Model:",
+    IMAGE_MODEL
   );
 
   const response =
@@ -348,11 +457,22 @@ async function generateAI({
     );
   }
 
+  /*
+   * IMAGE REQUEST
+   *
+   * Image requests are intentionally handled
+   * separately from the normal text model.
+   */
   if (
     isImageRequest(
       question
     )
   ) {
+    console.log(
+      "[HAHARI AI] Image request detected:",
+      question
+    );
+
     const image =
       await generateImage({
         question
@@ -393,6 +513,11 @@ async function generateAI({
     return image;
   }
 
+  /*
+   * NORMAL TEXT AI
+   *
+   * Existing text generation remains unchanged.
+   */
   const history =
     await getMemory(
       threadID,
@@ -632,6 +757,9 @@ app.post(
           isGroup
         });
 
+      /*
+       * IMAGE RESPONSE
+       */
       if (
         result.type ===
         "image"
@@ -671,6 +799,9 @@ app.post(
         });
       }
 
+      /*
+       * TEXT RESPONSE
+       */
       return res.json({
         success:
           true,
