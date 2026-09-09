@@ -8,11 +8,6 @@ app.use(express.json({
   limit: "1mb"
 }));
 
-
-// =====================================================
-// CONFIG
-// =====================================================
-
 const PORT =
   process.env.PORT || 10000;
 
@@ -26,10 +21,6 @@ const MODEL =
   process.env.GEMINI_MODEL ||
   "gemini-3.5-flash-lite";
 
-// -----------------------------------------------------
-// IMAGE MODEL
-// -----------------------------------------------------
-
 const IMAGE_MODEL =
   process.env.GEMINI_IMAGE_MODEL ||
   "gemini-3.1-flash-image";
@@ -37,43 +28,27 @@ const IMAGE_MODEL =
 const OWNER_UID =
   "100051329442110";
 
-
-// =====================================================
-// GEMINI
-// =====================================================
-
 let ai = null;
 
 if (GEMINI_API_KEY) {
-
   ai =
     new GoogleGenAI({
       apiKey:
         GEMINI_API_KEY
     });
-
 }
-
-
-// =====================================================
-// MONGODB
-// =====================================================
 
 let mongoClient = null;
 let db = null;
 let memoryCollection = null;
 
 async function connectMongo() {
-
   if (!MONGODB_URI) {
-
     console.warn(
       "[MONGODB] MONGODB_URI is not configured."
     );
-
     return false;
   }
-
 
   mongoClient =
     new MongoClient(
@@ -84,9 +59,7 @@ async function connectMongo() {
       }
     );
 
-
   await mongoClient.connect();
-
 
   db =
     mongoClient.db(
@@ -94,12 +67,10 @@ async function connectMongo() {
       "hahari_ai"
     );
 
-
   memoryCollection =
     db.collection(
       "conversation_memory"
     );
-
 
   await memoryCollection.createIndex(
     {
@@ -110,7 +81,6 @@ async function connectMongo() {
     }
   );
 
-
   console.log(
     "[MONGODB] Connected successfully."
   );
@@ -118,84 +88,50 @@ async function connectMongo() {
   return true;
 }
 
-
-// =====================================================
-// MEMORY KEY
-//
-// Each user gets separate memory inside each thread.
-//
-// Example:
-//
-// Group A + User 123
-// Group A + User 456
-//
-// They do NOT share the same conversation.
-//
-// =====================================================
-
 function getMemoryKey(
   threadID,
   userID
 ) {
-
   return (
     `${String(threadID)}:${String(userID)}`
   );
 }
 
-
-// =====================================================
-// GET MEMORY
-// =====================================================
-
 async function getMemory(
   threadID,
   userID
 ) {
-
   if (!memoryCollection)
     return [];
-
 
   const memoryKey =
     getMemoryKey(
       threadID,
       userID
     );
-
 
   const document =
     await memoryCollection.findOne({
       memoryKey
     });
 
-
   if (
     !document ||
     !Array.isArray(document.messages)
   ) {
-
     return [];
   }
 
-
   return document.messages;
 }
-
-
-// =====================================================
-// SAVE MEMORY
-// =====================================================
 
 async function saveMemory(
   threadID,
   userID,
   messages
 ) {
-
   if (!memoryCollection)
     return;
-
 
   const memoryKey =
     getMemoryKey(
@@ -203,83 +139,51 @@ async function saveMemory(
       userID
     );
 
-
-  // Keep the database memory reasonable.
-  // 20 messages = roughly 10 user/AI exchanges.
-
   const trimmed =
     messages.slice(-20);
 
-
   await memoryCollection.updateOne(
-
     {
       memoryKey
     },
-
     {
       $set: {
-
         threadID:
           String(threadID),
-
         userID:
           String(userID),
-
         messages:
           trimmed,
-
         updatedAt:
           new Date()
-
       },
-
       $setOnInsert: {
-
         createdAt:
           new Date()
-
       }
-
     },
-
     {
       upsert:
         true
     }
-
   );
 }
-
-
-// =====================================================
-// CLEAR MEMORY
-// =====================================================
 
 async function deleteMemory(
   threadID,
   userID
 ) {
-
   if (!memoryCollection)
     return;
 
-
   await memoryCollection.deleteOne({
-
     memoryKey:
       getMemoryKey(
         threadID,
         userID
       )
-
   });
 }
-
-
-// =====================================================
-// BUILD SYSTEM PROMPT
-// =====================================================
 
 function buildSystemPrompt({
   userID,
@@ -288,12 +192,10 @@ function buildSystemPrompt({
   threadID,
   isGroup
 }) {
-
   const ownerText =
     isOwner
       ? "YES. This user is your owner and creator."
       : "NO. This user is not your owner.";
-
 
   return `
 You are Hahari AI, the AI assistant of Hahari Bot.
@@ -331,291 +233,106 @@ IMPORTANT:
 `.trim();
 }
 
-
-// =====================================================
-// DETECT IMAGE REQUEST
-//
-// This is intentionally NOT triggered by every
-// "make/create/generate" sentence.
-//
-// Example:
-//
-// make a girl wearing a suit       -> IMAGE
-// create a picture of a cat        -> IMAGE
-// draw an anime girl               -> IMAGE
-// generate a landscape             -> IMAGE
-//
-// make me a schedule               -> TEXT
-// create a plan for studying       -> TEXT
-// generate a JavaScript function  -> TEXT
-//
-// =====================================================
-
-function isImageRequest(
-  question
-) {
-
+function isImageRequest(question) {
   const text =
     String(question || "")
-      .trim()
-      .toLowerCase();
+      .toLowerCase()
+      .trim();
 
-
-  if (!text)
-    return false;
-
-
-  // Explicit image words are always image requests.
-
-  const explicitImageWords = [
-    "image",
-    "picture",
-    "photo",
-    "photograph",
-    "portrait",
-    "illustration",
-    "artwork",
-    "wallpaper",
-    "poster",
-    "drawing",
-    "art"
+  const imagePatterns = [
+    /\b(make|create|generate|draw|render|produce)\b.*\b(image|picture|photo|art|artwork|illustration|portrait)\b/i,
+    /\b(image|picture|photo|art|artwork|illustration|portrait)\b.*\b(make|create|generate|draw|render|produce)\b/i,
+    /\bgenerate\s+(a|an|the)?\s*(girl|boy|man|woman|person|character|anime|logo|poster|wallpaper)\b/i,
+    /\b(create|make|draw|render)\s+(a|an|the)?\s*(girl|boy|man|woman|person|character|anime|logo|poster|wallpaper)\b/i,
+    /\b(show|give)\s+me\s+(an?|the)?\s*(image|picture|photo)\b/i
   ];
 
-
-  if (
-    explicitImageWords.some(
-      word =>
-        new RegExp(
-          `\\b${word}\\b`,
-          "i"
-        ).test(text)
-    )
-  ) {
-
-    return true;
-  }
-
-
-  // Common visual subjects.
-
-  const visualSubjects = [
-
-    "girl",
-    "boy",
-    "woman",
-    "man",
-    "person",
-    "people",
-    "character",
-    "anime",
-    "waifu",
-    "husband",
-    "wife",
-
-    "cat",
-    "dog",
-    "animal",
-    "bird",
-    "dragon",
-    "wolf",
-
-    "car",
-    "bike",
-    "motorcycle",
-
-    "house",
-    "building",
-    "city",
-    "landscape",
-    "mountain",
-    "beach",
-    "forest",
-    "sunset",
-    "moon",
-    "galaxy",
-    "space",
-
-    "logo",
-    "banner",
-    "thumbnail",
-    "icon",
-    "sticker",
-    "scene"
-  ];
-
-
-  const hasVisualSubject =
-    visualSubjects.some(
-      word =>
-        new RegExp(
-          `\\b${word}\\b`,
-          "i"
-        ).test(text)
-    );
-
-
-  // Image creation verbs.
-
-  const creationVerbs = [
-    "make",
-    "create",
-    "generate",
-    "draw",
-    "render",
-    "design",
-    "paint"
-  ];
-
-
-  const hasCreationVerb =
-    creationVerbs.some(
-      word =>
-        new RegExp(
-          `\\b${word}\\b`,
-          "i"
-        ).test(text)
-    );
-
-
-  // "make a girl", "create an anime character", etc.
-
-  if (
-    hasCreationVerb &&
-    hasVisualSubject
-  ) {
-
-    return true;
-  }
-
-
-  // More explicit visual phrases.
-
-  const visualPhrases = [
-
-    "generate an image",
-    "generate a picture",
-    "generate a photo",
-
-    "create an image",
-    "create a picture",
-    "create a photo",
-
-    "make an image",
-    "make a picture",
-    "make a photo",
-
-    "draw me",
-    "draw a",
-    "draw an",
-
-    "show me a picture",
-    "show me an image",
-
-    "make me a wallpaper",
-    "create a wallpaper",
-    "generate a wallpaper",
-
-    "make me a poster",
-    "create a poster",
-    "generate a poster",
-
-    "make me a logo",
-    "create a logo",
-    "generate a logo"
-  ];
-
-
-  return visualPhrases.some(
-    phrase =>
-      text.includes(phrase)
+  return imagePatterns.some(
+    pattern =>
+      pattern.test(text)
   );
 }
-
-
-// =====================================================
-// GENERATE IMAGE
-// =====================================================
 
 async function generateImage({
   question
 }) {
-
   if (!ai) {
-
     throw new Error(
       "GEMINI_API_KEY is not configured."
     );
   }
 
-
   console.log(
     "[HAHARI IMAGE] Generating image..."
   );
 
-
-  const interaction =
-    await ai.interactions.create({
-
+  const response =
+    await ai.models.generateContent({
       model:
         IMAGE_MODEL,
 
-      input:
+      contents:
         question,
 
-      response_format: {
+      config: {
+        responseModalities: [
+          "IMAGE"
+        ],
 
-        type:
-          "image",
+        responseFormat: {
+          image: {
+            aspectRatio:
+              "1:1",
 
-        mime_type:
-          "image/png",
+            imageSize:
+              "1K",
 
-        aspect_ratio:
-          "1:1",
-
-        image_size:
-          "1K"
-
+            mimeType:
+              "image/jpeg"
+          }
+        }
       }
-
     });
 
+  const parts =
+    response
+      ?.candidates?.[0]
+      ?.content?.parts;
 
-  const generatedImage =
-    interaction?.output_image;
-
-
-  if (
-    !generatedImage ||
-    !generatedImage.data
-  ) {
-
+  if (!Array.isArray(parts)) {
     throw new Error(
-      "Gemini returned no image."
+      "Gemini returned no image parts."
     );
   }
 
+  for (
+    const part of parts
+  ) {
+    if (
+      part?.inlineData?.data
+    ) {
+      console.log(
+        "[HAHARI IMAGE] Image generated successfully."
+      );
 
-  return {
+      return {
+        type:
+          "image",
 
-    type:
-      "image",
+        imageData:
+          part.inlineData.data,
 
-    imageData:
-      generatedImage.data,
+        mimeType:
+          part.inlineData.mimeType ||
+          "image/jpeg"
+      };
+    }
+  }
 
-    mimeType:
-      generatedImage.mime_type ||
-      generatedImage.mimeType ||
-      "image/png"
-
-  };
+  throw new Error(
+    "Gemini returned no image data."
+  );
 }
-
-
-// =====================================================
-// GENERATE AI
-// =====================================================
 
 async function generateAI({
   question,
@@ -625,35 +342,21 @@ async function generateAI({
   isOwner,
   isGroup
 }) {
-
   if (!ai) {
-
     throw new Error(
       "GEMINI_API_KEY is not configured."
     );
   }
 
-
-  // ---------------------------------------------------
-  // IMAGE REQUEST
-  // ---------------------------------------------------
-
   if (
-    isImageRequest(question)
+    isImageRequest(
+      question
+    )
   ) {
-
     const image =
       await generateImage({
         question
       });
-
-
-    // -------------------------------------------------
-    // Keep image requests in conversation memory.
-    //
-    // We NEVER store the image itself.
-    // Only the user's prompt and a small marker.
-    // -------------------------------------------------
 
     const history =
       await getMemory(
@@ -661,9 +364,7 @@ async function generateAI({
         userID
       );
 
-
     const updatedHistory = [
-
       ...history,
 
       {
@@ -681,28 +382,16 @@ async function generateAI({
         text:
           "[Generated an image for this request.]"
       }
-
     ];
 
-
     await saveMemory(
-
       threadID,
-
       userID,
-
       updatedHistory
-
     );
-
 
     return image;
   }
-
-
-  // ---------------------------------------------------
-  // Load persistent memory
-  // ---------------------------------------------------
 
   const history =
     await getMemory(
@@ -710,21 +399,13 @@ async function generateAI({
       userID
     );
 
-
-  // ---------------------------------------------------
-  // Build conversation
-  // ---------------------------------------------------
-
   const contents = [];
 
-
   contents.push({
-
     role:
       "user",
 
     parts: [
-
       {
         text:
           buildSystemPrompt({
@@ -734,19 +415,13 @@ async function generateAI({
             threadID,
             isGroup
           })
-
       }
-
     ]
-
   });
 
-
-  // Add previous conversation
   for (
     const item of history
   ) {
-
     if (
       !item ||
       !item.role ||
@@ -754,77 +429,49 @@ async function generateAI({
     )
       continue;
 
-
     contents.push({
-
       role:
         item.role,
 
       parts: [
-
         {
           text:
             item.text
         }
-
       ]
-
     });
-
   }
 
-
-  // Current question
   contents.push({
-
     role:
       "user",
 
     parts: [
-
       {
         text:
           question
       }
-
     ]
-
   });
-
-
-  // ---------------------------------------------------
-  // Gemini
-  // ---------------------------------------------------
 
   const response =
     await ai.models.generateContent({
-
       model:
         MODEL,
 
       contents
-
     });
-
 
   const answer =
     response?.text?.trim();
 
-
   if (!answer) {
-
     throw new Error(
       "Gemini returned an empty response."
     );
   }
 
-
-  // ---------------------------------------------------
-  // Save new conversation
-  // ---------------------------------------------------
-
   const updatedHistory = [
-
     ...history,
 
     {
@@ -842,35 +489,27 @@ async function generateAI({
       text:
         answer
     }
-
   ];
 
-
   await saveMemory(
-
     threadID,
-
     userID,
-
     updatedHistory
-
   );
 
+  return {
+    type:
+      "text",
 
-  return answer;
+    reply:
+      answer
+  };
 }
-
-
-// =====================================================
-// ROOT
-// =====================================================
 
 app.get(
   "/",
   (req, res) => {
-
     res.json({
-
       success:
         true,
 
@@ -879,23 +518,14 @@ app.get(
 
       version:
         "3.0.0"
-
     });
-
   }
 );
-
-
-// =====================================================
-// HEALTH
-// =====================================================
 
 app.get(
   "/health",
   (req, res) => {
-
     res.json({
-
       success:
         true,
 
@@ -921,80 +551,50 @@ app.get(
         Math.floor(
           process.uptime()
         )
-
     });
-
   }
 );
-
-
-// =====================================================
-// AI
-// =====================================================
 
 app.post(
   "/api/ai",
   async (req, res) => {
-
     const started =
       Date.now();
 
-
     try {
-
       const {
-
         message,
-
         user,
-
         conversation
-
       } =
         req.body || {};
-
-
-      // -------------------------------------------------
-      // Validate
-      // -------------------------------------------------
 
       if (
         !message ||
         typeof message !==
         "string"
       ) {
-
         return res.status(400).json({
-
           success:
             false,
 
           error:
             "Missing message."
-
         });
-
       }
-
 
       const question =
         message.trim();
 
-
       if (!question) {
-
         return res.status(400).json({
-
           success:
             false,
 
           error:
             "Message cannot be empty."
-
         });
-
       }
-
 
       const userID =
         String(
@@ -1002,13 +602,11 @@ app.post(
           "unknown"
         );
 
-
       const userName =
         String(
           user?.name ||
           "Unknown User"
         );
-
 
       const threadID =
         String(
@@ -1016,105 +614,45 @@ app.post(
           "unknown"
         );
 
-
       const isOwner =
         userID ===
         OWNER_UID;
-
 
       const isGroup =
         conversation?.scope ===
         "group-user";
 
-
-      // -------------------------------------------------
-      // Generate
-      // -------------------------------------------------
-
-      const reply =
+      const result =
         await generateAI({
-
           question,
-
           userID,
-
           userName,
-
           threadID,
-
           isOwner,
-
           isGroup
-
         });
 
-
-      // -------------------------------------------------
-      // IMAGE RESPONSE
-      // -------------------------------------------------
-
       if (
-        reply &&
-        reply.type ===
+        result.type ===
         "image"
       ) {
-
         return res.json({
-
           success:
             true,
-
-          model:
-            IMAGE_MODEL,
 
           type:
             "image",
 
+          model:
+            IMAGE_MODEL,
+
           imageData:
-            reply.imageData,
+            result.imageData,
 
           mimeType:
-            reply.mimeType,
+            result.mimeType,
 
-          user:
-            {
-              id:
-                userID,
-
-              name:
-                userName,
-
-              isOwner
-            },
-
-          memory:
-            true,
-
-          responseTime:
-            Date.now() -
-            started
-
-        });
-
-      }
-
-
-      // -------------------------------------------------
-      // ORIGINAL TEXT RESPONSE
-      // -------------------------------------------------
-
-      return res.json({
-
-        success:
-          true,
-
-        model:
-          MODEL,
-
-        reply,
-
-        user:
-          {
+          user: {
             id:
               userID,
 
@@ -1124,29 +662,56 @@ app.post(
             isOwner
           },
 
+          memory:
+            true,
+
+          responseTime:
+            Date.now() -
+            started
+        });
+      }
+
+      return res.json({
+        success:
+          true,
+
+        type:
+          "text",
+
+        model:
+          MODEL,
+
+        reply:
+          result.reply,
+
+        user: {
+          id:
+            userID,
+
+          name:
+            userName,
+
+          isOwner
+        },
+
         memory:
           true,
 
         responseTime:
           Date.now() -
           started
-
       });
 
-
     } catch (error) {
-
       console.error(
         "[API ERROR]",
         error
       );
 
-
       const status =
         error?.status ||
         error?.response?.status ||
         500;
-
 
       return res.status(
         status >= 400 &&
@@ -1154,7 +719,6 @@ app.post(
           ? status
           : 500
       ).json({
-
         success:
           false,
 
@@ -1165,116 +729,78 @@ app.post(
         responseTime:
           Date.now() -
           started
-
       });
-
     }
-
   }
 );
-
-
-// =====================================================
-// CLEAR MEMORY
-// =====================================================
 
 app.post(
   "/api/ai/clear",
   async (req, res) => {
-
     try {
-
       const {
         userID,
         threadID
       } =
         req.body || {};
 
-
       if (
         !userID ||
         !threadID
       ) {
-
         return res.status(400).json({
-
           success:
             false,
 
           error:
             "userID and threadID are required."
-
         });
-
       }
-
 
       await deleteMemory(
         String(threadID),
         String(userID)
       );
 
-
       return res.json({
-
         success:
           true,
 
         message:
           "Conversation memory cleared."
-
       });
 
-
     } catch (error) {
-
       console.error(
         "[CLEAR ERROR]",
         error
       );
 
-
       return res.status(500).json({
-
         success:
           false,
 
         error:
           "Failed to clear memory."
-
       });
-
     }
-
   }
 );
-
-
-// =====================================================
-// START SERVER
-// =====================================================
 
 app.listen(
   PORT,
   async () => {
-
     console.log(
       `🎀 Hahari AI API V3 running on port ${PORT}`
     );
 
-
     try {
-
       await connectMongo();
-
     } catch (error) {
-
       console.error(
         "[MONGODB] Connection failed:",
         error.message
       );
-
     }
-
   }
 );
