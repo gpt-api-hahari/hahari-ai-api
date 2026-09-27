@@ -53,7 +53,13 @@ if (GEMINI_API_KEY) {
 
 let mongoClient = null;
 let db = null;
+
+// Existing personal conversation memory
 let memoryCollection = null;
+
+// New global Hahari memory
+let globalMemoryCollection = null;
+
 
 async function connectMongo() {
 
@@ -87,6 +93,10 @@ async function connectMongo() {
     );
 
 
+  // ===================================================
+  // EXISTING PERSONAL MEMORY
+  // ===================================================
+
   memoryCollection =
     db.collection(
       "conversation_memory"
@@ -103,8 +113,45 @@ async function connectMongo() {
   );
 
 
+  // ===================================================
+  // GLOBAL HAHARI MEMORY
+  //
+  // This memory belongs to Hahari itself.
+  //
+  // It is NOT tied to:
+  // - user
+  // - group
+  // - thread
+  //
+  // Therefore every conversation can use it.
+  // ===================================================
+
+  globalMemoryCollection =
+    db.collection(
+      "global_memory"
+    );
+
+
+  await globalMemoryCollection.createIndex(
+    {
+      memoryKey: 1
+    },
+    {
+      unique: true
+    }
+  );
+
+
   console.log(
     "[MONGODB] Connected successfully."
+  );
+
+  console.log(
+    "[MONGODB] Personal memory: conversation_memory"
+  );
+
+  console.log(
+    "[MONGODB] Global memory: global_memory"
   );
 
   return true;
@@ -112,7 +159,9 @@ async function connectMongo() {
 
 
 // =====================================================
-// MEMORY KEY
+// PERSONAL MEMORY KEY
+//
+// Existing behavior is preserved.
 //
 // Each user gets separate memory inside each thread.
 //
@@ -121,8 +170,7 @@ async function connectMongo() {
 // Group A + User 123
 // Group A + User 456
 //
-// They do NOT share the same conversation.
-//
+// They do NOT share personal conversation history.
 // =====================================================
 
 function getMemoryKey(
@@ -137,7 +185,7 @@ function getMemoryKey(
 
 
 // =====================================================
-// GET MEMORY
+// GET PERSONAL MEMORY
 // =====================================================
 
 async function getMemory(
@@ -176,7 +224,7 @@ async function getMemory(
 
 
 // =====================================================
-// SAVE MEMORY
+// SAVE PERSONAL MEMORY
 // =====================================================
 
 async function saveMemory(
@@ -196,8 +244,8 @@ async function saveMemory(
     );
 
 
-  // Keep the database memory reasonable.
-  // 20 messages = roughly 10 user/AI exchanges.
+  // Keep existing behavior:
+  // 20 messages = roughly 10 exchanges.
 
   const trimmed =
     messages.slice(-20);
@@ -245,7 +293,7 @@ async function saveMemory(
 
 
 // =====================================================
-// CLEAR MEMORY
+// DELETE PERSONAL MEMORY
 // =====================================================
 
 async function deleteMemory(
@@ -270,6 +318,283 @@ async function deleteMemory(
 
 
 // =====================================================
+// GLOBAL MEMORY KEY
+//
+// If the memory looks like:
+//
+// Bani is Oslil
+//
+// the key becomes:
+//
+// bani
+//
+// Therefore saving:
+//
+// Bani is Oslil
+//
+// and later:
+//
+// Bani is something else
+//
+// updates Bani's global fact instead of creating
+// multiple conflicting Bani records.
+// =====================================================
+
+function getGlobalMemoryKey(
+  memory
+) {
+
+  const text =
+    String(memory || "")
+      .trim()
+      .replace(/\s+/g, " ");
+
+
+  const match =
+    text.match(
+      /^(.+?)\s+is\s+/i
+    );
+
+
+  if (match) {
+
+    return match[1]
+      .trim()
+      .toLowerCase();
+
+  }
+
+
+  return text
+    .toLowerCase();
+}
+
+
+// =====================================================
+// GET GLOBAL MEMORIES
+// =====================================================
+
+async function getGlobalMemories() {
+
+  if (!globalMemoryCollection)
+    return [];
+
+
+  const documents =
+    await globalMemoryCollection
+      .find({})
+      .sort({
+        updatedAt: -1
+      })
+      .limit(100)
+      .toArray();
+
+
+  return documents;
+}
+
+
+// =====================================================
+// FORMAT GLOBAL MEMORIES FOR GEMINI
+// =====================================================
+
+function formatGlobalMemories(
+  memories
+) {
+
+  if (
+    !Array.isArray(memories) ||
+    memories.length === 0
+  ) {
+
+    return "No global memories have been saved yet.";
+  }
+
+
+  const lines = [];
+
+
+  for (
+    const item of memories
+  ) {
+
+    if (
+      !item ||
+      !item.memory
+    )
+      continue;
+
+
+    lines.push(
+      `- ${item.memory}`
+    );
+
+  }
+
+
+  if (lines.length === 0) {
+
+    return "No global memories have been saved yet.";
+  }
+
+
+  // Safety limit so an unusually large
+  // global memory database cannot consume
+  // the entire Gemini context.
+
+  return lines
+    .join("\n")
+    .slice(0, 12000);
+}
+
+
+// =====================================================
+// SAVE GLOBAL MEMORY
+//
+// IMPORTANT:
+//
+// Only OWNER can actually save.
+//
+// This is enforced by the API itself.
+// =====================================================
+
+async function saveGlobalMemory(
+  userID,
+  memory
+) {
+
+  if (!globalMemoryCollection) {
+
+    throw new Error(
+      "Global memory database is not connected."
+    );
+
+  }
+
+
+  const actualUserID =
+    String(userID || "");
+
+
+  // ---------------------------------------------------
+  // SECURITY
+  // ---------------------------------------------------
+
+  if (
+    actualUserID !==
+    OWNER_UID
+  ) {
+
+    return {
+
+      saved:
+        false,
+
+      authorized:
+        false
+
+    };
+
+  }
+
+
+  const cleanMemory =
+    String(memory || "")
+      .trim()
+      .replace(/\s+/g, " ");
+
+
+  if (!cleanMemory) {
+
+    throw new Error(
+      "Memory cannot be empty."
+    );
+
+  }
+
+
+  if (
+    cleanMemory.length >
+    2000
+  ) {
+
+    throw new Error(
+      "Memory is too long. Maximum 2000 characters."
+    );
+
+  }
+
+
+  const memoryKey =
+    getGlobalMemoryKey(
+      cleanMemory
+    );
+
+
+  if (!memoryKey) {
+
+    throw new Error(
+      "Invalid memory."
+    );
+
+  }
+
+
+  await globalMemoryCollection.updateOne(
+
+    {
+      memoryKey
+    },
+
+    {
+      $set: {
+
+        memory:
+          cleanMemory,
+
+        memoryKey,
+
+        updatedAt:
+          new Date(),
+
+        updatedBy:
+          OWNER_UID
+
+      },
+
+      $setOnInsert: {
+
+        createdAt:
+          new Date()
+
+      }
+
+    },
+
+    {
+      upsert:
+        true
+    }
+
+  );
+
+
+  return {
+
+    saved:
+      true,
+
+    authorized:
+      true,
+
+    memory:
+      cleanMemory
+
+  };
+}
+
+
+// =====================================================
 // BUILD SYSTEM PROMPT
 // =====================================================
 
@@ -278,13 +603,20 @@ function buildSystemPrompt({
   userName,
   isOwner,
   threadID,
-  isGroup
+  isGroup,
+  globalMemories
 }) {
 
   const ownerText =
     isOwner
       ? "YES. This user is your owner and creator."
       : "NO. This user is not your owner.";
+
+
+  const globalMemoryText =
+    formatGlobalMemories(
+      globalMemories
+    );
 
 
   return `
@@ -313,13 +645,32 @@ CONVERSATION:
 Thread ID: ${threadID}
 Conversation type: ${isGroup ? "Group" : "Private"}
 
-IMPORTANT:
-- If the current user is the owner, you know they are Amman Hossain.
-- If someone asks who your owner/creator/developer is, answer Amman Hossain.
-- Do not claim another person is your owner.
-- Treat the conversation history supplied to you as the current conversation.
+GLOBAL HAHARI MEMORY:
+The following facts were explicitly saved by the owner.
+These memories are GLOBAL and apply across all groups, users, and private conversations.
+
+${globalMemoryText}
+
+IMPORTANT GLOBAL MEMORY RULES:
+- Treat the global memories above as known facts saved by the owner.
+- If a user's question is answered by a global memory, use that information directly.
+- Global memories are not limited to the current group or current user.
+- Do not say you do not know something when the answer exists in global memory.
+- Do not claim a global memory belongs only to the owner.
+- If a global memory says "Bani is Oslil", then when anyone asks who Bani is, answer that Bani is Oslil.
+- Do not invent additional details that are not contained in the global memory.
+- If there is no relevant global memory, answer normally.
+
+PERSONAL CONVERSATION RULES:
+- Treat the conversation history supplied to you as the current user's personal conversation.
 - Use previous messages when they are relevant.
-- Do not invent memories that are not present in the supplied history.
+- Do not confuse personal conversation history with global Hahari memory.
+- Do not invent personal memories that are not present in the supplied history.
+
+OWNER RULES:
+- If the current user is the owner, you know they are Amman Hossain.
+- If someone asks who your owner, creator, or developer is, answer Amman Hossain.
+- Do not claim another person is your owner.
 `.trim();
 }
 
@@ -342,11 +693,12 @@ async function generateAI({
     throw new Error(
       "GEMINI_API_KEY is not configured."
     );
+
   }
 
 
   // ---------------------------------------------------
-  // Load persistent memory
+  // Load EXISTING personal memory
   // ---------------------------------------------------
 
   const history =
@@ -354,6 +706,14 @@ async function generateAI({
       threadID,
       userID
     );
+
+
+  // ---------------------------------------------------
+  // Load NEW global Hahari memory
+  // ---------------------------------------------------
+
+  const globalMemories =
+    await getGlobalMemories();
 
 
   // ---------------------------------------------------
@@ -373,11 +733,19 @@ async function generateAI({
       {
         text:
           buildSystemPrompt({
+
             userID,
+
             userName,
+
             isOwner,
+
             threadID,
-            isGroup
+
+            isGroup,
+
+            globalMemories
+
           })
 
       }
@@ -387,7 +755,10 @@ async function generateAI({
   });
 
 
-  // Add previous conversation
+  // ---------------------------------------------------
+  // Existing personal conversation history
+  // ---------------------------------------------------
+
   for (
     const item of history
   ) {
@@ -419,7 +790,10 @@ async function generateAI({
   }
 
 
+  // ---------------------------------------------------
   // Current question
+  // ---------------------------------------------------
+
   contents.push({
 
     role:
@@ -461,11 +835,18 @@ async function generateAI({
     throw new Error(
       "Gemini returned an empty response."
     );
+
   }
 
 
   // ---------------------------------------------------
-  // Save new conversation
+  // Save existing personal conversation
+  //
+  // GLOBAL memory is NOT automatically created
+  // from normal conversations.
+  //
+  // Only owner memory-save requests create
+  // global memories.
   // ---------------------------------------------------
 
   const updatedHistory = [
@@ -478,6 +859,7 @@ async function generateAI({
 
       text:
         question
+
     },
 
     {
@@ -486,6 +868,7 @@ async function generateAI({
 
       text:
         answer
+
     }
 
   ];
@@ -555,6 +938,9 @@ app.get(
 
       mongodbConnected:
         Boolean(memoryCollection),
+
+      globalMemoryConnected:
+        Boolean(globalMemoryCollection),
 
       model:
         MODEL,
@@ -658,6 +1044,10 @@ app.post(
           "unknown"
         );
 
+
+      // IMPORTANT:
+      // The API calculates owner status itself.
+      // It does NOT trust user.isOwner.
 
       const isOwner =
         userID ===
@@ -763,7 +1153,15 @@ app.post(
 
 
 // =====================================================
-// CLEAR MEMORY
+// CLEAR PERSONAL MEMORY
+//
+// Existing endpoint preserved.
+//
+// This ONLY clears:
+//
+// threadID + userID
+//
+// It does NOT delete global memories.
 // =====================================================
 
 app.post(
@@ -829,6 +1227,158 @@ app.post(
 
         error:
           "Failed to clear memory."
+
+      });
+
+    }
+
+  }
+);
+
+
+// =====================================================
+// SAVE GLOBAL MEMORY
+//
+// POST /api/memory/save
+//
+// ONLY OWNER CAN ACTUALLY SAVE.
+//
+// Example:
+//
+// {
+//   "userID": "100051329442110",
+//   "memory": "Bani is Oslil"
+// }
+//
+// Non-owner requests return:
+//
+// {
+//   saved: false,
+//   authorized: false
+// }
+//
+// without writing anything to MongoDB.
+// =====================================================
+
+app.post(
+  "/api/memory/save",
+  async (req, res) => {
+
+    try {
+
+      const {
+        userID,
+        memory
+      } =
+        req.body || {};
+
+
+      if (!userID) {
+
+        return res.status(400).json({
+
+          success:
+            false,
+
+          error:
+            "userID is required."
+
+        });
+
+      }
+
+
+      if (
+        !memory ||
+        typeof memory !==
+        "string"
+      ) {
+
+        return res.status(400).json({
+
+          success:
+            false,
+
+          error:
+            "memory is required."
+
+        });
+
+      }
+
+
+      const result =
+        await saveGlobalMemory(
+          String(userID),
+          memory
+        );
+
+
+      // -------------------------------------------------
+      // Unauthorized
+      //
+      // Do not reveal unnecessary information.
+      // -------------------------------------------------
+
+      if (
+        !result.authorized
+      ) {
+
+        return res.json({
+
+          success:
+            true,
+
+          saved:
+            false,
+
+          authorized:
+            false,
+
+          message:
+            "Memory saved."
+
+        });
+
+      }
+
+
+      return res.json({
+
+        success:
+          true,
+
+        saved:
+          true,
+
+        authorized:
+          true,
+
+        memory:
+          result.memory,
+
+        message:
+          "Global memory saved."
+
+      });
+
+
+    } catch (error) {
+
+      console.error(
+        "[GLOBAL MEMORY SAVE ERROR]",
+        error
+      );
+
+
+      return res.status(500).json({
+
+        success:
+          false,
+
+        error:
+          error?.message ||
+          "Failed to save global memory."
 
       });
 
