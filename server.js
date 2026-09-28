@@ -22,9 +22,35 @@ const GEMINI_API_KEY =
 const MONGODB_URI =
   process.env.MONGODB_URI;
 
-const MODEL =
+
+// =====================================================
+// GEMINI MODELS
+//
+// The first model comes from Render's GEMINI_MODEL
+// environment variable.
+//
+// If that model temporarily fails with 503/429/etc,
+// Hahari automatically tries the next model.
+// =====================================================
+
+const PRIMARY_MODEL =
   process.env.GEMINI_MODEL ||
-  "gemini-3.5-flash-lite";
+  "gemini-3.6-flash";
+
+const GEMINI_MODELS = [
+  PRIMARY_MODEL,
+
+  "gemini-3.8-flash",
+  "gemini-3.7-flash",
+  "gemini-3.6-flash",
+  "gemini-3.5-flash",
+  "gemini-3.5-flash-lite"
+].filter(
+  (model, index, array) =>
+    model &&
+    array.indexOf(model) === index
+);
+
 
 const OWNER_UID =
   "100051329442110";
@@ -325,6 +351,177 @@ IMPORTANT:
 
 
 // =====================================================
+// CHECK WHETHER AN ERROR SHOULD TRIGGER FALLBACK
+// =====================================================
+
+function shouldFallback(error) {
+
+  const status =
+    error?.status ||
+    error?.response?.status ||
+    error?.code;
+
+
+  const errorText =
+    String(
+      error?.response?.data ||
+      error?.message ||
+      error ||
+      ""
+    ).toLowerCase();
+
+
+  // Temporary server / availability errors
+  if (
+    status === 429 ||
+    status === 500 ||
+    status === 502 ||
+    status === 503 ||
+    status === 504
+  ) {
+
+    return true;
+  }
+
+
+  // Gemini sometimes provides the error information
+  // inside the message instead of a normal HTTP status.
+
+  if (
+    errorText.includes("unavailable") ||
+    errorText.includes("high demand") ||
+    errorText.includes("overloaded") ||
+    errorText.includes("temporarily unavailable") ||
+    errorText.includes("resource exhausted") ||
+    errorText.includes("rate limit")
+  ) {
+
+    return true;
+  }
+
+
+  return false;
+}
+
+
+// =====================================================
+// GEMINI FALLBACK REQUEST
+// =====================================================
+
+async function generateWithFallback(
+  contents
+) {
+
+  let lastError = null;
+
+
+  for (
+    const model of GEMINI_MODELS
+  ) {
+
+    try {
+
+      console.log(
+        `[HAHARI AI] Trying model: ${model}`
+      );
+
+
+      const response =
+        await ai.models.generateContent({
+
+          model,
+
+          contents
+
+        });
+
+
+      const answer =
+        response?.text?.trim();
+
+
+      if (!answer) {
+
+        throw new Error(
+          "Gemini returned an empty response."
+        );
+      }
+
+
+      console.log(
+        `[HAHARI AI] Success with model: ${model}`
+      );
+
+
+      return {
+
+        answer,
+
+        model
+
+      };
+
+
+    } catch (error) {
+
+      lastError =
+        error;
+
+
+      const status =
+        error?.status ||
+        error?.response?.status ||
+        error?.code ||
+        "unknown";
+
+
+      const errorMessage =
+        error?.message ||
+        String(error);
+
+
+      console.error(
+        `[HAHARI AI] Model ${model} failed.`,
+        {
+          status,
+          error:
+            errorMessage
+        }
+      );
+
+
+      // If this isn't a temporary availability/
+      // rate-limit problem, don't continue cycling
+      // through every model.
+
+      if (
+        !shouldFallback(error)
+      ) {
+
+        break;
+      }
+
+
+      // Temporary failure.
+      // Move to the next model.
+
+      console.log(
+        `[HAHARI AI] ${model} unavailable. Trying next fallback model...`
+      );
+
+    }
+
+  }
+
+
+  throw lastError ||
+    new Error(
+      "All Gemini models are currently unavailable."
+    );
+}
+
+
+// =====================================================
 // GENERATE AI
 // =====================================================
 
@@ -388,6 +585,7 @@ async function generateAI({
 
 
   // Add previous conversation
+
   for (
     const item of history
   ) {
@@ -420,6 +618,7 @@ async function generateAI({
 
 
   // Current question
+
   contents.push({
 
     role:
@@ -438,30 +637,21 @@ async function generateAI({
 
 
   // ---------------------------------------------------
-  // Gemini
+  // Gemini with automatic fallback
   // ---------------------------------------------------
 
-  const response =
-    await ai.models.generateContent({
-
-      model:
-        MODEL,
-
+  const result =
+    await generateWithFallback(
       contents
-
-    });
+    );
 
 
   const answer =
-    response?.text?.trim();
+    result.answer;
 
 
-  if (!answer) {
-
-    throw new Error(
-      "Gemini returned an empty response."
-    );
-  }
+  const usedModel =
+    result.model;
 
 
   // ---------------------------------------------------
@@ -502,7 +692,14 @@ async function generateAI({
   );
 
 
-  return answer;
+  return {
+
+    answer,
+
+    model:
+      usedModel
+
+  };
 }
 
 
@@ -556,8 +753,14 @@ app.get(
       mongodbConnected:
         Boolean(memoryCollection),
 
-      model:
-        MODEL,
+      primaryModel:
+        PRIMARY_MODEL,
+
+      fallbackModels:
+        GEMINI_MODELS,
+
+      modelCount:
+        GEMINI_MODELS.length,
 
       uptime:
         Math.floor(
@@ -673,7 +876,7 @@ app.post(
       // Generate
       // -------------------------------------------------
 
-      const reply =
+      const result =
         await generateAI({
 
           question,
@@ -696,10 +899,14 @@ app.post(
         success:
           true,
 
-        model:
-          MODEL,
+        // This is the model that ACTUALLY generated
+        // the response, including fallback models.
 
-        reply,
+        model:
+          result.model,
+
+        reply:
+          result.answer,
 
         user:
           {
@@ -848,6 +1055,16 @@ app.listen(
 
     console.log(
       `🎀 Hahari AI API V3 running on port ${PORT}`
+    );
+
+
+    console.log(
+      `[HAHARI AI] Primary model: ${PRIMARY_MODEL}`
+    );
+
+
+    console.log(
+      `[HAHARI AI] Fallback models: ${GEMINI_MODELS.join(", ")}`
     );
 
 
