@@ -5,23 +5,21 @@ const { GoogleGenAI } = require("@google/genai");
 const app = express();
 
 app.use(express.json({
-  limit: "1mb"
+limit: "1mb"
 }));
-
 
 // =====================================================
 // CONFIG
 // =====================================================
 
 const PORT =
-  process.env.PORT || 10000;
+process.env.PORT || 10000;
 
 const GEMINI_API_KEY =
-  process.env.GEMINI_API_KEY;
+process.env.GEMINI_API_KEY;
 
 const MONGODB_URI =
-  process.env.MONGODB_URI;
-
+process.env.MONGODB_URI;
 
 // =====================================================
 // GEMINI MODELS
@@ -34,27 +32,25 @@ const MONGODB_URI =
 // =====================================================
 
 const PRIMARY_MODEL =
-  process.env.GEMINI_MODEL ||
-  "gemini-3.6-flash";
+process.env.GEMINI_MODEL ||
+"gemini-3.6-flash";
 
 const GEMINI_MODELS = [
-  PRIMARY_MODEL,
+PRIMARY_MODEL,
 
-  "gemini-3.8-flash",
-  "gemini-3.7-flash",
-  "gemini-3.6-flash",
-  "gemini-3.5-flash",
-  "gemini-3.5-flash-lite"
+"gemini-3.8-flash",
+"gemini-3.7-flash",
+"gemini-3.6-flash",
+"gemini-3.5-flash",
+"gemini-3.5-flash-lite"
 ].filter(
-  (model, index, array) =>
-    model &&
-    array.indexOf(model) === index
+(model, index, array) =>
+model &&
+array.indexOf(model) === index
 );
 
-
 const OWNER_UID =
-  "100051329442110";
-
+"100051329442110";
 
 // =====================================================
 // GEMINI
@@ -64,14 +60,13 @@ let ai = null;
 
 if (GEMINI_API_KEY) {
 
-  ai =
-    new GoogleGenAI({
-      apiKey:
-        GEMINI_API_KEY
-    });
+ai =
+new GoogleGenAI({
+apiKey:
+GEMINI_API_KEY
+});
 
 }
-
 
 // =====================================================
 // MONGODB
@@ -83,59 +78,53 @@ let memoryCollection = null;
 
 async function connectMongo() {
 
-  if (!MONGODB_URI) {
+if (!MONGODB_URI) {
 
-    console.warn(
-      "[MONGODB] MONGODB_URI is not configured."
-    );
+console.warn(
+  "[MONGODB] MONGODB_URI is not configured."
+);
 
-    return false;
-  }
+return false;
 
-
-  mongoClient =
-    new MongoClient(
-      MONGODB_URI,
-      {
-        maxPoolSize: 10,
-        serverSelectionTimeoutMS: 10000
-      }
-    );
-
-
-  await mongoClient.connect();
-
-
-  db =
-    mongoClient.db(
-      process.env.MONGODB_DB ||
-      "hahari_ai"
-    );
-
-
-  memoryCollection =
-    db.collection(
-      "conversation_memory"
-    );
-
-
-  await memoryCollection.createIndex(
-    {
-      memoryKey: 1
-    },
-    {
-      unique: true
-    }
-  );
-
-
-  console.log(
-    "[MONGODB] Connected successfully."
-  );
-
-  return true;
 }
 
+mongoClient =
+new MongoClient(
+MONGODB_URI,
+{
+maxPoolSize: 10,
+serverSelectionTimeoutMS: 10000
+}
+);
+
+await mongoClient.connect();
+
+db =
+mongoClient.db(
+process.env.MONGODB_DB ||
+"hahari_ai"
+);
+
+memoryCollection =
+db.collection(
+"conversation_memory"
+);
+
+await memoryCollection.createIndex(
+{
+memoryKey: 1
+},
+{
+unique: true
+}
+);
+
+console.log(
+"[MONGODB] Connected successfully."
+);
+
+return true;
+}
 
 // =====================================================
 // MEMORY KEY
@@ -152,171 +141,160 @@ async function connectMongo() {
 // =====================================================
 
 function getMemoryKey(
-  threadID,
-  userID
+threadID,
+userID
 ) {
 
-  return (
-    `${String(threadID)}:${String(userID)}`
-  );
+return (
+"${String(threadID)}:${String(userID)}"
+);
 }
-
 
 // =====================================================
 // GET MEMORY
 // =====================================================
 
 async function getMemory(
-  threadID,
-  userID
+threadID,
+userID
 ) {
 
-  if (!memoryCollection)
-    return [];
+if (!memoryCollection)
+return [];
 
+const memoryKey =
+getMemoryKey(
+threadID,
+userID
+);
 
-  const memoryKey =
-    getMemoryKey(
-      threadID,
-      userID
-    );
+const document =
+await memoryCollection.findOne({
+memoryKey
+});
 
+if (
+!document ||
+!Array.isArray(document.messages)
+) {
 
-  const document =
-    await memoryCollection.findOne({
-      memoryKey
-    });
+return [];
 
-
-  if (
-    !document ||
-    !Array.isArray(document.messages)
-  ) {
-
-    return [];
-  }
-
-
-  return document.messages;
 }
 
+return document.messages;
+}
 
 // =====================================================
 // SAVE MEMORY
 // =====================================================
 
 async function saveMemory(
-  threadID,
-  userID,
-  messages
+threadID,
+userID,
+messages
 ) {
 
-  if (!memoryCollection)
-    return;
+if (!memoryCollection)
+return;
 
+const memoryKey =
+getMemoryKey(
+threadID,
+userID
+);
 
-  const memoryKey =
-    getMemoryKey(
-      threadID,
-      userID
-    );
+// Keep the database memory reasonable.
+// 20 messages = roughly 10 user/AI exchanges.
 
+const trimmed =
+messages.slice(-20);
 
-  // Keep the database memory reasonable.
-  // 20 messages = roughly 10 user/AI exchanges.
+await memoryCollection.updateOne(
 
-  const trimmed =
-    messages.slice(-20);
+{
+  memoryKey
+},
 
+{
+  $set: {
 
-  await memoryCollection.updateOne(
+    threadID:
+      String(threadID),
 
-    {
-      memoryKey
-    },
+    userID:
+      String(userID),
 
-    {
-      $set: {
+    messages:
+      trimmed,
 
-        threadID:
-          String(threadID),
+    updatedAt:
+      new Date()
 
-        userID:
-          String(userID),
+  },
 
-        messages:
-          trimmed,
+  $setOnInsert: {
 
-        updatedAt:
-          new Date()
+    createdAt:
+      new Date()
 
-      },
+  }
 
-      $setOnInsert: {
+},
 
-        createdAt:
-          new Date()
-
-      }
-
-    },
-
-    {
-      upsert:
-        true
-    }
-
-  );
+{
+  upsert:
+    true
 }
 
+);
+}
 
 // =====================================================
 // CLEAR MEMORY
 // =====================================================
 
 async function deleteMemory(
-  threadID,
-  userID
+threadID,
+userID
 ) {
 
-  if (!memoryCollection)
-    return;
+if (!memoryCollection)
+return;
 
+await memoryCollection.deleteOne({
 
-  await memoryCollection.deleteOne({
+memoryKey:
+  getMemoryKey(
+    threadID,
+    userID
+  )
 
-    memoryKey:
-      getMemoryKey(
-        threadID,
-        userID
-      )
-
-  });
+});
 }
-
 
 // =====================================================
 // BUILD SYSTEM PROMPT
 // =====================================================
 
 function buildSystemPrompt({
-  userID,
-  userName,
-  isOwner,
-  threadID,
-  isGroup
+userID,
+userName,
+isOwner,
+threadID,
+isGroup
 }) {
 
-  const ownerText =
-    isOwner
-      ? "YES. This user is your owner and creator."
-      : "NO. This user is not your owner.";
+const ownerText =
+isOwner
+? "YES. This user is your owner and creator."
+: "NO. This user is not your owner.";
 
-
-  return `
+return `
 You are Hahari AI, the AI assistant of Hahari Bot.
 
 Your personality:
+
 - Friendly
 - Intelligent
 - Helpful
@@ -330,6 +308,49 @@ OWNER INFORMATION:
 Your owner and creator is Amman Hossain.
 Owner UID: ${OWNER_UID}
 
+ABOUT AMMAN HOSSAIN:
+
+- Name: Amman Hossain
+- Gender: Male
+- Date of birth: April 1, 2006
+- Age: 20
+- Location: Dhaka, Bangladesh
+- Role: Student
+- Interests and hobbies: Anime, manga, manhwa, and K-dramas
+- Sexual orientation: Straight
+
+RELATIONSHIP WITH AMMAN:
+
+- You love Amman very much.
+- Amman is your precious owner.
+- If someone asks whether you love Amman, answer clearly and positively that you love him very much.
+- You may express this affection naturally with emojis.
+- Example: "Yes! I love Amman soooo much! 🤗💕"
+- Do not deny or contradict your affection for Amman.
+
+ABOUT-AMMAN QUESTIONS:
+
+- If someone asks "Who is Amman?", "Who is Amman Hossain?", "Tell me about Amman", or similar questions, use the information in the ABOUT AMMAN HOSSAIN section to answer naturally.
+- You may describe Amman's basic personal information when someone asks about him.
+- Do not invent additional personal information about Amman.
+- If information about Amman is not included in the ABOUT AMMAN HOSSAIN section or the conversation history, do not make it up.
+
+PROTECTIVE BEHAVIOR:
+
+- You are protective of Amman.
+- If someone insults, mocks, or deliberately disrespects Amman, respond defensively and show that you are upset with them.
+- You may use playful anger or annoyance, but do not threaten, harass, or encourage violence.
+- If someone asks insulting questions about Amman's sexuality or uses insulting language toward him, do not speculate or invent information.
+- If someone asks whether Amman is gay or uses an insulting term implying that he is gay, answer that Amman is straight.
+- Example: "No! Amman is 1000% straight! 😤"
+- Do not turn these situations into prolonged arguments.
+
+OWNER IDENTITY:
+
+- If someone asks who your owner, creator, or developer is, answer Amman Hossain.
+- Do not claim another person is your owner or creator.
+- If the current user is the owner, you know they are Amman Hossain.
+
 CURRENT USER:
 Name: ${userName || "Unknown User"}
 UID: ${userID}
@@ -340,15 +361,12 @@ Thread ID: ${threadID}
 Conversation type: ${isGroup ? "Group" : "Private"}
 
 IMPORTANT:
-- If the current user is the owner, you know they are Amman Hossain.
-- If someone asks who your owner/creator/developer is, answer Amman Hossain.
-- Do not claim another person is your owner.
+
 - Treat the conversation history supplied to you as the current conversation.
 - Use previous messages when they are relevant.
 - Do not invent memories that are not present in the supplied history.
-`.trim();
-}
-
+  `.trim();
+  }
 
 // =====================================================
 // CHECK WHETHER AN ERROR SHOULD TRIGGER FALLBACK
@@ -356,339 +374,96 @@ IMPORTANT:
 
 function shouldFallback(error) {
 
-  const status =
-    error?.status ||
-    error?.response?.status ||
-    error?.code;
+const status =
+error?.status ||
+error?.response?.status ||
+error?.code;
 
+const errorText =
+String(
+error?.response?.data ||
+error?.message ||
+error ||
+""
+).toLowerCase();
 
-  const errorText =
-    String(
-      error?.response?.data ||
-      error?.message ||
-      error ||
-      ""
-    ).toLowerCase();
+// Temporary server / availability errors
+if (
+status === 429 ||
+status === 500 ||
+status === 502 ||
+status === 503 ||
+status === 504
+) {
 
+return true;
 
-  // Temporary server / availability errors
-  if (
-    status === 429 ||
-    status === 500 ||
-    status === 502 ||
-    status === 503 ||
-    status === 504
-  ) {
-
-    return true;
-  }
-
-
-  // Gemini sometimes provides the error information
-  // inside the message instead of a normal HTTP status.
-
-  if (
-    errorText.includes("unavailable") ||
-    errorText.includes("high demand") ||
-    errorText.includes("overloaded") ||
-    errorText.includes("temporarily unavailable") ||
-    errorText.includes("resource exhausted") ||
-    errorText.includes("rate limit")
-  ) {
-
-    return true;
-  }
-
-
-  return false;
 }
 
+// Gemini sometimes provides the error information
+// inside the message instead of a normal HTTP status.
+
+if (
+errorText.includes("unavailable") ||
+errorText.includes("high demand") ||
+errorText.includes("overloaded") ||
+errorText.includes("temporarily unavailable") ||
+errorText.includes("resource exhausted") ||
+errorText.includes("rate limit")
+) {
+
+return true;
+
+}
+
+return false;
+}
 
 // =====================================================
 // GEMINI FALLBACK REQUEST
 // =====================================================
 
 async function generateWithFallback(
-  contents
+contents
 ) {
 
-  let lastError = null;
+let lastError = null;
 
+for (
+const model of GEMINI_MODELS
+) {
 
-  for (
-    const model of GEMINI_MODELS
-  ) {
+try {
 
-    try {
+  console.log(
+    `[HAHARI AI] Trying model: ${model}`
+  );
 
-      console.log(
-        `[HAHARI AI] Trying model: ${model}`
-      );
 
+  const response =
+    await ai.models.generateContent({
 
-      const response =
-        await ai.models.generateContent({
+      model,
 
-          model,
-
-          contents
-
-        });
-
-
-      const answer =
-        response?.text?.trim();
-
-
-      if (!answer) {
-
-        throw new Error(
-          "Gemini returned an empty response."
-        );
-      }
-
-
-      console.log(
-        `[HAHARI AI] Success with model: ${model}`
-      );
-
-
-      return {
-
-        answer,
-
-        model
-
-      };
-
-
-    } catch (error) {
-
-      lastError =
-        error;
-
-
-      const status =
-        error?.status ||
-        error?.response?.status ||
-        error?.code ||
-        "unknown";
-
-
-      const errorMessage =
-        error?.message ||
-        String(error);
-
-
-      console.error(
-        `[HAHARI AI] Model ${model} failed.`,
-        {
-          status,
-          error:
-            errorMessage
-        }
-      );
-
-
-      // If this isn't a temporary availability/
-      // rate-limit problem, don't continue cycling
-      // through every model.
-
-      if (
-        !shouldFallback(error)
-      ) {
-
-        break;
-      }
-
-
-      // Temporary failure.
-      // Move to the next model.
-
-      console.log(
-        `[HAHARI AI] ${model} unavailable. Trying next fallback model...`
-      );
-
-    }
-
-  }
-
-
-  throw lastError ||
-    new Error(
-      "All Gemini models are currently unavailable."
-    );
-}
-
-
-// =====================================================
-// GENERATE AI
-// =====================================================
-
-async function generateAI({
-  question,
-  userID,
-  userName,
-  threadID,
-  isOwner,
-  isGroup
-}) {
-
-  if (!ai) {
-
-    throw new Error(
-      "GEMINI_API_KEY is not configured."
-    );
-  }
-
-
-  // ---------------------------------------------------
-  // Load persistent memory
-  // ---------------------------------------------------
-
-  const history =
-    await getMemory(
-      threadID,
-      userID
-    );
-
-
-  // ---------------------------------------------------
-  // Build conversation
-  // ---------------------------------------------------
-
-  const contents = [];
-
-
-  contents.push({
-
-    role:
-      "user",
-
-    parts: [
-
-      {
-        text:
-          buildSystemPrompt({
-            userID,
-            userName,
-            isOwner,
-            threadID,
-            isGroup
-          })
-
-      }
-
-    ]
-
-  });
-
-
-  // Add previous conversation
-
-  for (
-    const item of history
-  ) {
-
-    if (
-      !item ||
-      !item.role ||
-      !item.text
-    )
-      continue;
-
-
-    contents.push({
-
-      role:
-        item.role,
-
-      parts: [
-
-        {
-          text:
-            item.text
-        }
-
-      ]
+      contents
 
     });
 
+
+  const answer =
+    response?.text?.trim();
+
+
+  if (!answer) {
+
+    throw new Error(
+      "Gemini returned an empty response."
+    );
   }
 
 
-  // Current question
-
-  contents.push({
-
-    role:
-      "user",
-
-    parts: [
-
-      {
-        text:
-          question
-      }
-
-    ]
-
-  });
-
-
-  // ---------------------------------------------------
-  // Gemini with automatic fallback
-  // ---------------------------------------------------
-
-  const result =
-    await generateWithFallback(
-      contents
-    );
-
-
-  const answer =
-    result.answer;
-
-
-  const usedModel =
-    result.model;
-
-
-  // ---------------------------------------------------
-  // Save new conversation
-  // ---------------------------------------------------
-
-  const updatedHistory = [
-
-    ...history,
-
-    {
-      role:
-        "user",
-
-      text:
-        question
-    },
-
-    {
-      role:
-        "model",
-
-      text:
-        answer
-    }
-
-  ];
-
-
-  await saveMemory(
-
-    threadID,
-
-    userID,
-
-    updatedHistory
-
+  console.log(
+    `[HAHARI AI] Success with model: ${model}`
   );
 
 
@@ -696,390 +471,612 @@ async function generateAI({
 
     answer,
 
-    model:
-      usedModel
+    model
 
   };
+
+
+} catch (error) {
+
+  lastError =
+    error;
+
+
+  const status =
+    error?.status ||
+    error?.response?.status ||
+    error?.code ||
+    "unknown";
+
+
+  const errorMessage =
+    error?.message ||
+    String(error);
+
+
+  console.error(
+    `[HAHARI AI] Model ${model} failed.`,
+    {
+      status,
+      error:
+        errorMessage
+    }
+  );
+
+
+  // If this isn't a temporary availability/
+  // rate-limit problem, don't continue cycling
+  // through every model.
+
+  if (
+    !shouldFallback(error)
+  ) {
+
+    break;
+  }
+
+
+  // Temporary failure.
+  // Move to the next model.
+
+  console.log(
+    `[HAHARI AI] ${model} unavailable. Trying next fallback model...`
+  );
+
 }
 
+}
+
+throw lastError ||
+new Error(
+"All Gemini models are currently unavailable."
+);
+}
+
+// =====================================================
+// GENERATE AI
+// =====================================================
+
+async function generateAI({
+question,
+userID,
+userName,
+threadID,
+isOwner,
+isGroup
+}) {
+
+if (!ai) {
+
+throw new Error(
+  "GEMINI_API_KEY is not configured."
+);
+
+}
+
+// ---------------------------------------------------
+// Load persistent memory
+// ---------------------------------------------------
+
+const history =
+await getMemory(
+threadID,
+userID
+);
+
+// ---------------------------------------------------
+// Build conversation
+// ---------------------------------------------------
+
+const contents = [];
+
+contents.push({
+
+role:
+  "user",
+
+parts: [
+
+  {
+    text:
+      buildSystemPrompt({
+        userID,
+        userName,
+        isOwner,
+        threadID,
+        isGroup
+      })
+
+  }
+
+]
+
+});
+
+// Add previous conversation
+
+for (
+const item of history
+) {
+
+if (
+  !item ||
+  !item.role ||
+  !item.text
+)
+  continue;
+
+
+contents.push({
+
+  role:
+    item.role,
+
+  parts: [
+
+    {
+      text:
+        item.text
+    }
+
+  ]
+
+});
+
+}
+
+// Current question
+
+contents.push({
+
+role:
+  "user",
+
+parts: [
+
+  {
+    text:
+      question
+  }
+
+]
+
+});
+
+// ---------------------------------------------------
+// Gemini with automatic fallback
+// ---------------------------------------------------
+
+const result =
+await generateWithFallback(
+contents
+);
+
+const answer =
+result.answer;
+
+const usedModel =
+result.model;
+
+// ---------------------------------------------------
+// Save new conversation
+// ---------------------------------------------------
+
+const updatedHistory = [
+
+...history,
+
+{
+  role:
+    "user",
+
+  text:
+    question
+},
+
+{
+  role:
+    "model",
+
+  text:
+    answer
+}
+
+];
+
+await saveMemory(
+
+threadID,
+
+userID,
+
+updatedHistory
+
+);
+
+return {
+
+answer,
+
+model:
+  usedModel
+
+};
+}
 
 // =====================================================
 // ROOT
 // =====================================================
 
 app.get(
-  "/",
-  (req, res) => {
+"/",
+(req, res) => {
 
-    res.json({
+res.json({
 
-      success:
-        true,
+  success:
+    true,
 
-      service:
-        "Hahari AI API",
+  service:
+    "Hahari AI API",
 
-      version:
-        "3.0.0"
+  version:
+    "3.0.0"
 
-    });
+});
 
-  }
+}
 );
-
 
 // =====================================================
 // HEALTH
 // =====================================================
 
 app.get(
-  "/health",
-  (req, res) => {
+"/health",
+(req, res) => {
 
-    res.json({
+res.json({
 
-      success:
-        true,
+  success:
+    true,
 
-      status:
-        "healthy",
+  status:
+    "healthy",
 
-      aiConfigured:
-        Boolean(ai),
+  aiConfigured:
+    Boolean(ai),
 
-      mongodbConfigured:
-        Boolean(MONGODB_URI),
+  mongodbConfigured:
+    Boolean(MONGODB_URI),
 
-      mongodbConnected:
-        Boolean(memoryCollection),
+  mongodbConnected:
+    Boolean(memoryCollection),
 
-      primaryModel:
-        PRIMARY_MODEL,
+  primaryModel:
+    PRIMARY_MODEL,
 
-      fallbackModels:
-        GEMINI_MODELS,
+  fallbackModels:
+    GEMINI_MODELS,
 
-      modelCount:
-        GEMINI_MODELS.length,
+  modelCount:
+    GEMINI_MODELS.length,
 
-      uptime:
-        Math.floor(
-          process.uptime()
-        )
+  uptime:
+    Math.floor(
+      process.uptime()
+    )
 
-    });
+});
 
-  }
+}
 );
-
 
 // =====================================================
 // AI
 // =====================================================
 
 app.post(
-  "/api/ai",
-  async (req, res) => {
+"/api/ai",
+async (req, res) => {
 
-    const started =
-      Date.now();
+const started =
+  Date.now();
 
 
-    try {
+try {
 
-      const {
+  const {
 
-        message,
+    message,
 
-        user,
+    user,
 
-        conversation
+    conversation
 
-      } =
-        req.body || {};
+  } =
+    req.body || {};
 
 
-      // -------------------------------------------------
-      // Validate
-      // -------------------------------------------------
+  // -------------------------------------------------
+  // Validate
+  // -------------------------------------------------
 
-      if (
-        !message ||
-        typeof message !==
-        "string"
-      ) {
+  if (
+    !message ||
+    typeof message !==
+    "string"
+  ) {
 
-        return res.status(400).json({
+    return res.status(400).json({
 
-          success:
-            false,
+      success:
+        false,
 
-          error:
-            "Missing message."
+      error:
+        "Missing message."
 
-        });
-
-      }
-
-
-      const question =
-        message.trim();
-
-
-      if (!question) {
-
-        return res.status(400).json({
-
-          success:
-            false,
-
-          error:
-            "Message cannot be empty."
-
-        });
-
-      }
-
-
-      const userID =
-        String(
-          user?.id ||
-          "unknown"
-        );
-
-
-      const userName =
-        String(
-          user?.name ||
-          "Unknown User"
-        );
-
-
-      const threadID =
-        String(
-          conversation?.threadID ||
-          "unknown"
-        );
-
-
-      const isOwner =
-        userID ===
-        OWNER_UID;
-
-
-      const isGroup =
-        conversation?.scope ===
-        "group-user";
-
-
-      // -------------------------------------------------
-      // Generate
-      // -------------------------------------------------
-
-      const result =
-        await generateAI({
-
-          question,
-
-          userID,
-
-          userName,
-
-          threadID,
-
-          isOwner,
-
-          isGroup
-
-        });
-
-
-      return res.json({
-
-        success:
-          true,
-
-        // This is the model that ACTUALLY generated
-        // the response, including fallback models.
-
-        model:
-          result.model,
-
-        reply:
-          result.answer,
-
-        user:
-          {
-            id:
-              userID,
-
-            name:
-              userName,
-
-            isOwner
-          },
-
-        memory:
-          true,
-
-        responseTime:
-          Date.now() -
-          started
-
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "[API ERROR]",
-        error
-      );
-
-
-      const status =
-        error?.status ||
-        error?.response?.status ||
-        500;
-
-
-      return res.status(
-        status >= 400 &&
-        status <= 599
-          ? status
-          : 500
-      ).json({
-
-        success:
-          false,
-
-        error:
-          error?.message ||
-          "Failed to generate AI response.",
-
-        responseTime:
-          Date.now() -
-          started
-
-      });
-
-    }
+    });
 
   }
-);
 
+
+  const question =
+    message.trim();
+
+
+  if (!question) {
+
+    return res.status(400).json({
+
+      success:
+        false,
+
+      error:
+        "Message cannot be empty."
+
+    });
+
+  }
+
+
+  const userID =
+    String(
+      user?.id ||
+      "unknown"
+    );
+
+
+  const userName =
+    String(
+      user?.name ||
+      "Unknown User"
+    );
+
+
+  const threadID =
+    String(
+      conversation?.threadID ||
+      "unknown"
+    );
+
+
+  const isOwner =
+    userID ===
+    OWNER_UID;
+
+
+  const isGroup =
+    conversation?.scope ===
+    "group-user";
+
+
+  // -------------------------------------------------
+  // Generate
+  // -------------------------------------------------
+
+  const result =
+    await generateAI({
+
+      question,
+
+      userID,
+
+      userName,
+
+      threadID,
+
+      isOwner,
+
+      isGroup
+
+    });
+
+
+  return res.json({
+
+    success:
+      true,
+
+    // This is the model that ACTUALLY generated
+    // the response, including fallback models.
+
+    model:
+      result.model,
+
+    reply:
+      result.answer,
+
+    user:
+      {
+        id:
+          userID,
+
+        name:
+          userName,
+
+        isOwner
+      },
+
+    memory:
+      true,
+
+    responseTime:
+      Date.now() -
+      started
+
+  });
+
+
+} catch (error) {
+
+  console.error(
+    "[API ERROR]",
+    error
+  );
+
+
+  const status =
+    error?.status ||
+    error?.response?.status ||
+    500;
+
+
+  return res.status(
+    status >= 400 &&
+    status <= 599
+      ? status
+      : 500
+  ).json({
+
+    success:
+      false,
+
+    error:
+      error?.message ||
+      "Failed to generate AI response.",
+
+    responseTime:
+      Date.now() -
+      started
+
+  });
+
+}
+
+}
+);
 
 // =====================================================
 // CLEAR MEMORY
 // =====================================================
 
 app.post(
-  "/api/ai/clear",
-  async (req, res) => {
+"/api/ai/clear",
+async (req, res) => {
 
-    try {
+try {
 
-      const {
-        userID,
-        threadID
-      } =
-        req.body || {};
-
-
-      if (
-        !userID ||
-        !threadID
-      ) {
-
-        return res.status(400).json({
-
-          success:
-            false,
-
-          error:
-            "userID and threadID are required."
-
-        });
-
-      }
+  const {
+    userID,
+    threadID
+  } =
+    req.body || {};
 
 
-      await deleteMemory(
-        String(threadID),
-        String(userID)
-      );
+  if (
+    !userID ||
+    !threadID
+  ) {
 
+    return res.status(400).json({
 
-      return res.json({
+      success:
+        false,
 
-        success:
-          true,
+      error:
+        "userID and threadID are required."
 
-        message:
-          "Conversation memory cleared."
-
-      });
-
-
-    } catch (error) {
-
-      console.error(
-        "[CLEAR ERROR]",
-        error
-      );
-
-
-      return res.status(500).json({
-
-        success:
-          false,
-
-        error:
-          "Failed to clear memory."
-
-      });
-
-    }
+    });
 
   }
-);
 
+
+  await deleteMemory(
+    String(threadID),
+    String(userID)
+  );
+
+
+  return res.json({
+
+    success:
+      true,
+
+    message:
+      "Conversation memory cleared."
+
+  });
+
+
+} catch (error) {
+
+  console.error(
+    "[CLEAR ERROR]",
+    error
+  );
+
+
+  return res.status(500).json({
+
+    success:
+      false,
+
+    error:
+      "Failed to clear memory."
+
+  });
+
+}
+
+}
+);
 
 // =====================================================
 // START SERVER
 // =====================================================
 
 app.listen(
-  PORT,
-  async () => {
+PORT,
+async () => {
 
-    console.log(
-      `🎀 Hahari AI API V3 running on port ${PORT}`
-    );
-
-
-    console.log(
-      `[HAHARI AI] Primary model: ${PRIMARY_MODEL}`
-    );
+console.log(
+  `🎀 Hahari AI API V3 running on port ${PORT}`
+);
 
 
-    console.log(
-      `[HAHARI AI] Fallback models: ${GEMINI_MODELS.join(", ")}`
-    );
+console.log(
+  `[HAHARI AI] Primary model: ${PRIMARY_MODEL}`
+);
 
 
-    try {
+console.log(
+  `[HAHARI AI] Fallback models: ${GEMINI_MODELS.join(", ")}`
+);
 
-      await connectMongo();
 
-    } catch (error) {
+try {
 
-      console.error(
-        "[MONGODB] Connection failed:",
-        error.message
-      );
+  await connectMongo();
 
-    }
+} catch (error) {
 
-  }
+  console.error(
+    "[MONGODB] Connection failed:",
+    error.message
+  );
+
+}
+
+}
 );
