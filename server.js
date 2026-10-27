@@ -1,5 +1,4 @@
 const express = require("express");
-const { MongoClient } = require("mongodb");
 const { GoogleGenAI } = require("@google/genai");
 
 const app = express();
@@ -13,7 +12,7 @@ app.use(express.json({
 // =====================================================
 
 const PORT =
-process.env.PORT || 10000;
+  process.env.PORT || 10000;
 
 // API keys from separate Google AI Studio projects.
 // Configure these in Render Environment Variables.
@@ -24,12 +23,8 @@ const GEMINI_API_KEYS = [
   process.env.GEMINI_API_KEY_4
 ].map(key => String(key || "").trim()).filter(Boolean);
 
-const MONGODB_URI =
-process.env.MONGODB_URI;
-
 // =====================================================
 // GEMINI MODELS
-// Original model list preserved.
 // =====================================================
 
 const PRIMARY_MODEL =
@@ -47,7 +42,7 @@ const GEMINI_MODELS = [
 );
 
 const OWNER_UID =
-"100051329442110";
+  "100051329442110";
 
 // =====================================================
 // IMAGE CONFIG
@@ -61,16 +56,41 @@ const ALLOWED_IMAGE_TYPES = [
 ];
 
 // =====================================================
-// MEMORY CLEANUP CONFIG
+// TEMPORARY MEMORY CONFIG
+// Memory expires after 30 minutes of inactivity.
+// Keeps the latest 20 messages per conversation.
+// Memory is lost when the server restarts.
 // =====================================================
 
 const MEMORY_MAX_AGE_MS =
-24 * 60 * 60 * 1000;
+  30 * 60 * 1000;
 
 const CLEANUP_INTERVAL_MS =
-24 * 60 * 60 * 1000;
+  5 * 60 * 1000;
 
-let cleanupTimer = null;
+const conversationMemory = new Map();
+
+function cleanupOldMemory() {
+  const now = Date.now();
+
+  for (const [memoryKey, record] of conversationMemory) {
+    if (
+      !record ||
+      now - record.updatedAt >= MEMORY_MAX_AGE_MS
+    ) {
+      conversationMemory.delete(memoryKey);
+    }
+  }
+}
+
+const cleanupTimer = setInterval(
+  cleanupOldMemory,
+  CLEANUP_INTERVAL_MS
+);
+
+if (typeof cleanupTimer.unref === "function") {
+  cleanupTimer.unref();
+}
 
 // =====================================================
 // GEMINI CLIENTS
@@ -85,93 +105,6 @@ const aiClients = GEMINI_API_KEYS.map(
 );
 
 // =====================================================
-// MONGODB
-// =====================================================
-
-let mongoClient = null;
-let db = null;
-let memoryCollection = null;
-
-async function connectMongo() {
-  if (!MONGODB_URI) {
-    console.warn(
-      "[MONGODB] MONGODB_URI is not configured."
-    );
-    return false;
-  }
-
-  mongoClient = new MongoClient(
-    MONGODB_URI,
-    {
-      maxPoolSize: 10,
-      serverSelectionTimeoutMS: 10000
-    }
-  );
-
-  await mongoClient.connect();
-
-  db = mongoClient.db(
-    process.env.MONGODB_DB || "hahari_ai"
-  );
-
-  memoryCollection = db.collection(
-    "conversation_memory"
-  );
-
-  await memoryCollection.createIndex(
-    { memoryKey: 1 },
-    { unique: true }
-  );
-
-  console.log(
-    "[MONGODB] Connected successfully."
-  );
-
-  await cleanupOldMemory();
-
-  if (cleanupTimer) {
-    clearInterval(cleanupTimer);
-  }
-
-  cleanupTimer = setInterval(() => {
-    cleanupOldMemory().catch(error => {
-      console.error(
-        "[MEMORY CLEANUP ERROR]",
-        error.message
-      );
-    });
-  }, CLEANUP_INTERVAL_MS);
-
-  if (typeof cleanupTimer.unref === "function") {
-    cleanupTimer.unref();
-  }
-
-  return true;
-}
-
-// =====================================================
-// MEMORY CLEANUP
-// =====================================================
-
-async function cleanupOldMemory() {
-  if (!memoryCollection) return;
-
-  const cutoff = new Date(
-    Date.now() - MEMORY_MAX_AGE_MS
-  );
-
-  const result = await memoryCollection.deleteMany({
-    updatedAt: {
-      $lt: cutoff
-    }
-  });
-
-  console.log(
-    `[MEMORY CLEANUP] Removed ${result.deletedCount} expired conversation record(s).`
-  );
-}
-
-// =====================================================
 // MEMORY KEY
 // =====================================================
 
@@ -180,33 +113,37 @@ function getMemoryKey(threadID, userID) {
 }
 
 // =====================================================
-// GET MEMORY
+// GET TEMPORARY MEMORY
 // =====================================================
 
 async function getMemory(threadID, userID) {
-  if (!memoryCollection) return [];
-
   const memoryKey = getMemoryKey(
     threadID,
     userID
   );
 
-  const document = await memoryCollection.findOne({
-    memoryKey
-  });
+  const record = conversationMemory.get(memoryKey);
 
-  if (
-    !document ||
-    !Array.isArray(document.messages)
-  ) {
+  if (!record) {
     return [];
   }
 
-  return document.messages;
+  // Expire memory after 30 minutes without activity.
+  if (
+    Date.now() - record.updatedAt >= MEMORY_MAX_AGE_MS
+  ) {
+    conversationMemory.delete(memoryKey);
+    return [];
+  }
+
+  // Refresh inactivity timer.
+  record.updatedAt = Date.now();
+
+  return record.messages;
 }
 
 // =====================================================
-// SAVE MEMORY
+// SAVE TEMPORARY MEMORY
 // =====================================================
 
 async function saveMemory(
@@ -214,45 +151,25 @@ async function saveMemory(
   userID,
   messages
 ) {
-  if (!memoryCollection) return;
-
   const memoryKey = getMemoryKey(
     threadID,
     userID
   );
 
-  const trimmed = messages.slice(-20);
-
-  await memoryCollection.updateOne(
-    { memoryKey },
-    {
-      $set: {
-        threadID: String(threadID),
-        userID: String(userID),
-        messages: trimmed,
-        updatedAt: new Date()
-      },
-      $setOnInsert: {
-        createdAt: new Date()
-      }
-    },
-    { upsert: true }
-  );
+  conversationMemory.set(memoryKey, {
+    messages: messages.slice(-20),
+    updatedAt: Date.now()
+  });
 }
 
 // =====================================================
-// CLEAR MEMORY
+// CLEAR TEMPORARY MEMORY
 // =====================================================
 
 async function deleteMemory(threadID, userID) {
-  if (!memoryCollection) return;
-
-  await memoryCollection.deleteOne({
-    memoryKey: getMemoryKey(
-      threadID,
-      userID
-    )
-  });
+  conversationMemory.delete(
+    getMemoryKey(threadID, userID)
+  );
 }
 
 // =====================================================
@@ -572,7 +489,7 @@ async function generateAI({
     );
   }
 
-  // Load persistent memory.
+  // Load temporary memory.
   const history = await getMemory(
     threadID,
     userID
@@ -688,13 +605,16 @@ app.get("/", (req, res) => {
 // =====================================================
 
 app.get("/health", (req, res) => {
+  cleanupOldMemory();
+
   res.json({
     success: true,
     status: "healthy",
     aiConfigured: aiClients.length > 0,
     configuredKeyCount: aiClients.length,
-    mongodbConfigured: Boolean(MONGODB_URI),
-    mongodbConnected: Boolean(memoryCollection),
+    temporaryMemoryEnabled: true,
+    memoryTimeoutMinutes: 30,
+    activeConversations: conversationMemory.size,
     primaryModel: PRIMARY_MODEL,
     fallbackModels: GEMINI_MODELS,
     modelCount: GEMINI_MODELS.length,
@@ -885,7 +805,7 @@ app.post("/api/ai/clear", async (req, res) => {
 // START SERVER
 // =====================================================
 
-app.listen(PORT, async () => {
+app.listen(PORT, () => {
   console.log(
     `🎀 Hahari AI API V3 running on port ${PORT}`
   );
@@ -902,12 +822,7 @@ app.listen(PORT, async () => {
     `[HAHARI AI] Configured API keys: ${aiClients.length}`
   );
 
-  try {
-    await connectMongo();
-  } catch (error) {
-    console.error(
-      "[MONGODB] Connection failed:",
-      error.message
-    );
-  }
+  console.log(
+    "[HAHARI AI] Temporary conversation memory enabled (30-minute inactivity timeout)."
+  );
 });
