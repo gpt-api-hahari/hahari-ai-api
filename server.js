@@ -33,7 +33,6 @@ process.env.MONGODB_URI;
 // =====================================================
 
 const PRIMARY_MODEL =
-const PRIMARY_MODEL =
   process.env.GEMINI_MODEL || "gemini-3.6-flash";
 
 const GEMINI_MODELS = [
