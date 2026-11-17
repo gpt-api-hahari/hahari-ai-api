@@ -455,10 +455,15 @@ function shouldTryAnotherModel(error) {
   const status = getErrorStatus(error);
   const text = getErrorText(error);
 
+  if (status === 503) return true;
+
   return status === 404 ||
     text.includes("model not found") ||
     text.includes("not supported for generatecontent") ||
-    text.includes("is not found for api version");
+    text.includes("is not found for api version") ||
+    text.includes("high demand") ||
+    text.includes("overloaded") ||
+    text.includes("temporarily unavailable");
 }
 
 // =====================================================
