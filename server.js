@@ -31,8 +31,18 @@ const TAVILY_SEARCH_URL = "https://api.tavily.com/search";
 const TAVILY_MAX_RESULTS = 5;
 const TAVILY_CACHE_TTL_MS = 10 * 60 * 1000;
 const TAVILY_CACHE_MAX_ENTRIES = 200;
-const TAVILY_REQUEST_TIMEOUT_MS = 12000;
+const TAVILY_REQUEST_TIMEOUT_MS = 8000;
 const TAVILY_SEARCH_CACHE = new Map();
+
+// A key that recently failed is temporarily skipped instead of being retried
+// on every request. Round-robin spreads normal traffic across configured keys.
+const KEY_COOLDOWN_MS = 90 * 1000;
+const AUTH_COOLDOWN_MS = 10 * 60 * 1000;
+const MODEL_COOLDOWN_MS = 10 * 60 * 1000;
+const GEMINI_REQUEST_TIMEOUT_MS = 25000;
+const keyHealth = new Map();
+const modelHealth = new Map();
+let nextKeyIndex = 0;
 let tavilySearchesSinceRestart = 0;
 let tavilyCreditsSinceRestart = 0;
 
@@ -431,45 +441,106 @@ function shouldTryAnotherModel(error) {
 }
 
 // =====================================================
-// GEMINI REQUEST WITH FOUR-KEY ROTATION
+// GEMINI REQUEST WITH ROUND-ROBIN KEY ROTATION + HEALTH COOLDOWNS
 // =====================================================
+function getCooldownRemaining(map, key) {
+  const until = map.get(key) || 0;
+  if (until <= Date.now()) {
+    map.delete(key);
+    return 0;
+  }
+  return until - Date.now();
+}
+
+function markKeyFailure(entry, error) {
+  const status = getErrorStatus(error);
+  const text = getErrorText(error);
+  let cooldown = 0;
+  if (status === 401 || status === 403 || text.includes("api key not valid") || text.includes("permission denied")) {
+    cooldown = AUTH_COOLDOWN_MS;
+  } else if (status === 429 || status >= 500 || error?.code === "HAHARI_REQUEST_TIMEOUT" || text.includes("resource exhausted") || text.includes("rate limit") || text.includes("quota") || text.includes("overloaded")) {
+    cooldown = KEY_COOLDOWN_MS;
+  }
+  if (cooldown) keyHealth.set(entry.keyNumber, Date.now() + cooldown);
+}
+
+function withTimeout(promise, timeoutMs, label) {
+  let timer;
+  const timeout = new Promise((_, reject) => {
+    timer = setTimeout(() => {
+      const error = new Error(`${label} timed out after ${timeoutMs}ms.`);
+      error.code = "HAHARI_REQUEST_TIMEOUT";
+      reject(error);
+    }, timeoutMs);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 async function generateWithFallback(contents) {
   if (aiClients.length === 0) {
     throw new Error("No Gemini API keys are configured. Add GEMINI_API_KEY to Render.");
   }
 
   let lastError = null;
+  const keyOrder = aiClients.map((_, offset) => aiClients[(nextKeyIndex + offset) % aiClients.length]);
+  nextKeyIndex = (nextKeyIndex + 1) % aiClients.length;
+  let attemptedAnyKey = false;
+
   for (const model of GEMINI_MODELS) {
+    const modelCooldown = getCooldownRemaining(modelHealth, model);
+    if (modelCooldown) {
+      console.log(`[HAHARI AI] Skipping model ${model}; cooldown ${Math.ceil(modelCooldown / 1000)}s remains.`);
+      continue;
+    }
+
     let modelUnavailable = false;
-    for (const entry of aiClients) {
+    for (const entry of keyOrder) {
+      const keyCooldown = getCooldownRemaining(keyHealth, entry.keyNumber);
+      if (keyCooldown) continue;
+      attemptedAnyKey = true;
+
+      const attemptStarted = Date.now();
       try {
-        console.log(`[HAHARI AI] Trying model ${model} with API key slot ${entry.keyNumber}/${aiClients.length}.`);
-        const response = await entry.client.models.generateContent({ model, contents });
+        console.log(`[HAHARI AI] Trying ${model} with key slot ${entry.keyNumber}/${aiClients.length}.`);
+        const response = await withTimeout(
+          entry.client.models.generateContent({ model, contents }),
+          GEMINI_REQUEST_TIMEOUT_MS,
+          `Gemini ${model}`
+        );
         const answer = response?.text?.trim();
         if (!answer) throw new Error("Gemini returned an empty response.");
-        console.log(`[HAHARI AI] Success. Model: ${model}; key slot: ${entry.keyNumber}.`);
-        return { answer, model };
+        console.log(`[HAHARI AI] Success: ${model}, key ${entry.keyNumber}, ${Date.now() - attemptStarted}ms.`);
+        return { answer, model, keyNumber: entry.keyNumber, generationTime: Date.now() - attemptStarted };
       } catch (error) {
         lastError = error;
         const status = getErrorStatus(error) || "unknown";
-        console.error(`[HAHARI AI] Model ${model}, key slot ${entry.keyNumber} failed.`, {
-          status,
-          error: error?.message || String(error)
-        });
+        console.error(`[HAHARI AI] ${model}, key ${entry.keyNumber} failed (${status}) after ${Date.now() - attemptStarted}ms: ${error?.message || error}`);
+
         if (shouldTryAnotherModel(error)) {
+          modelHealth.set(model, Date.now() + MODEL_COOLDOWN_MS);
           modelUnavailable = true;
-          console.log(`[HAHARI AI] Model ${model} is unavailable. Trying the next model.`);
+          console.log(`[HAHARI AI] Model ${model} marked unavailable temporarily.`);
           break;
         }
-        if (shouldTryAnotherKey(error)) {
-          console.log(`[HAHARI AI] Trying the next configured API key for ${model}.`);
+
+        if (shouldTryAnotherKey(error) || error?.code === "HAHARI_REQUEST_TIMEOUT") {
+          markKeyFailure(entry, error);
           continue;
         }
         throw error;
       }
     }
-    if (modelUnavailable) continue;
-    console.log(`[HAHARI AI] All configured keys failed for model ${model}. Checking the next model.`);
+    if (!modelUnavailable && keyOrder.every(entry => getCooldownRemaining(keyHealth, entry.keyNumber) > 0)) {
+      console.log(`[HAHARI AI] All keys are cooling down; checking next model only if a key becomes available.`);
+    }
+  }
+
+  if (!attemptedAnyKey) {
+    const remaining = Math.min(...aiClients.map(entry => getCooldownRemaining(keyHealth, entry.keyNumber) || Infinity));
+    const error = new Error("All configured Gemini API keys are temporarily cooling down. Please retry shortly.");
+    error.status = 503;
+    error.retryAfterMs = Number.isFinite(remaining) ? remaining : KEY_COOLDOWN_MS;
+    throw error;
   }
   throw lastError || new Error("All configured Gemini keys and fallback models are unavailable.");
 }
@@ -482,7 +553,9 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
     throw new Error("No Gemini API keys are configured. Add GEMINI_API_KEY to Render.");
   }
 
+  const requestStarted = Date.now();
   const history = await getMemory(threadID, userID);
+  const historyLoadedAt = Date.now();
   let searchResult = { attempted: false, ok: false, reason: "not_needed", results: [] };
 
   if (needsWebSearch(question)) {
@@ -493,6 +566,7 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
     }
   }
 
+  const searchFinishedAt = Date.now();
   const contents = [];
   contents.push({
     role: "user",
@@ -516,7 +590,9 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
   }
   contents.push({ role: "user", parts: userParts });
 
+  const promptBuiltAt = Date.now();
   const result = await generateWithFallback(contents);
+  const generatedAt = Date.now();
   const answer = result.answer;
   const updatedHistory = [
     ...history,
@@ -524,10 +600,19 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
     { role: "model", text: answer }
   ];
   await saveMemory(threadID, userID, updatedHistory);
+  const memorySavedAt = Date.now();
 
   return {
     answer,
     model: result.model,
+    timings: {
+      memoryLoadMs: historyLoadedAt - requestStarted,
+      webSearchMs: searchFinishedAt - historyLoadedAt,
+      promptBuildMs: promptBuiltAt - searchFinishedAt,
+      geminiMs: generatedAt - promptBuiltAt,
+      memorySaveMs: memorySavedAt - generatedAt,
+      totalMs: memorySavedAt - requestStarted
+    },
     webSearch: {
       attempted: Boolean(searchResult.attempted),
       successful: Boolean(searchResult.ok),
@@ -541,7 +626,7 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
 // ROOT
 // =====================================================
 app.get("/", (req, res) => {
-  res.json({ success: true, service: "Hahari AI API", version: "3.1.0" });
+  res.json({ success: true, service: "Hahari AI API", version: "4.1.0" });
 });
 
 // =====================================================
@@ -567,6 +652,9 @@ app.get("/health", (req, res) => {
     primaryModel: PRIMARY_MODEL,
     fallbackModels: GEMINI_MODELS,
     modelCount: GEMINI_MODELS.length,
+    geminiRequestTimeoutMs: GEMINI_REQUEST_TIMEOUT_MS,
+    keyCooldowns: Array.from(keyHealth.entries()).map(([keyNumber, until]) => ({ keyNumber, remainingMs: Math.max(0, until - Date.now()) })),
+    modelCooldowns: Array.from(modelHealth.entries()).map(([model, until]) => ({ model, remainingMs: Math.max(0, until - Date.now()) })),
     uptime: Math.floor(process.uptime())
   });
 });
@@ -612,11 +700,12 @@ app.post("/api/ai", async (req, res) => {
       memory: true,
       imageAnalyzed: Boolean(imageInput),
       webSearch: result.webSearch,
+      timings: result.timings,
       responseTime: Date.now() - started
     });
   } catch (error) {
     console.error("[API ERROR]", error);
-    const status = getErrorStatus(error) || 500;
+    const status = error?.code === "HAHARI_REQUEST_TIMEOUT" ? 503 : (getErrorStatus(error) || 500);
     return res.status(status >= 400 && status <= 599 ? status : 500).json({
       success: false,
       error: error?.message || "Failed to generate AI response.",
@@ -646,10 +735,11 @@ app.post("/api/ai/clear", async (req, res) => {
 // START SERVER
 // =====================================================
 app.listen(PORT, () => {
-  console.log(`🎀 Hahari AI API V3.1 running on port ${PORT}`);
+  console.log(`🎀 Hahari AI API V4.1 running on port ${PORT}`);
   console.log(`[HAHARI AI] Primary model: ${PRIMARY_MODEL}`);
   console.log(`[HAHARI AI] Fallback models: ${GEMINI_MODELS.join(", ")}`);
   console.log(`[HAHARI AI] Configured API keys: ${aiClients.length}`);
+  console.log(`[HAHARI AI] Gemini timeout: ${GEMINI_REQUEST_TIMEOUT_MS}ms; key rotation and cooldowns enabled.`);
   console.log("[HAHARI AI] Temporary conversation memory enabled (30-minute inactivity timeout).");
   console.log(`[HAHARI SEARCH] Tavily web search: ${TAVILY_API_KEY ? "enabled" : "disabled (add TAVILY_API_KEY to Render)"}`);
 });
