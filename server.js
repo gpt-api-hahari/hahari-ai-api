@@ -39,6 +39,8 @@ const TAVILY_SEARCH_CACHE = new Map();
 const KEY_COOLDOWN_MS = 90 * 1000;
 const AUTH_COOLDOWN_MS = 10 * 60 * 1000;
 const MODEL_COOLDOWN_MS = 10 * 60 * 1000;
+// A 503 high-demand response is usually model-wide, not a bad API key.
+const MODEL_OVERLOAD_COOLDOWN_MS = 15 * 1000;
 const GEMINI_REQUEST_TIMEOUT_MS = 25000;
 const keyHealth = new Map();
 const modelHealth = new Map();
@@ -424,20 +426,21 @@ function getErrorText(error) {
 function shouldTryAnotherKey(error) {
   const status = getErrorStatus(error);
   const text = getErrorText(error);
-  if ([401, 403, 429, 500, 502, 503, 504].includes(status)) return true;
+  // 503/high-demand is handled as a model problem below. Do not poison every key.
+  if ([401, 403, 429, 500, 502, 504].includes(status)) return true;
   return text.includes("resource exhausted") || text.includes("rate limit") ||
     text.includes("quota") || text.includes("api key not valid") ||
-    text.includes("permission denied") || text.includes("unauthenticated") ||
-    text.includes("temporarily unavailable") || text.includes("high demand") ||
-    text.includes("overloaded");
+    text.includes("permission denied") || text.includes("unauthenticated");
 }
 
 function shouldTryAnotherModel(error) {
   const status = getErrorStatus(error);
   const text = getErrorText(error);
-  return status === 404 || text.includes("model not found") ||
+  return status === 404 || status === 503 ||
+    text.includes("model not found") ||
     text.includes("not supported for generatecontent") ||
-    text.includes("is not found for api version");
+    text.includes("is not found for api version") ||
+    text.includes("high demand") || text.includes("overloaded");
 }
 
 // =====================================================
@@ -485,10 +488,12 @@ async function generateWithFallback(contents) {
   const keyOrder = aiClients.map((_, offset) => aiClients[(nextKeyIndex + offset) % aiClients.length]);
   nextKeyIndex = (nextKeyIndex + 1) % aiClients.length;
   let attemptedAnyKey = false;
+  let skippedForCooldown = false;
 
   for (const model of GEMINI_MODELS) {
     const modelCooldown = getCooldownRemaining(modelHealth, model);
     if (modelCooldown) {
+      skippedForCooldown = true;
       console.log(`[HAHARI AI] Skipping model ${model}; cooldown ${Math.ceil(modelCooldown / 1000)}s remains.`);
       continue;
     }
@@ -496,7 +501,10 @@ async function generateWithFallback(contents) {
     let modelUnavailable = false;
     for (const entry of keyOrder) {
       const keyCooldown = getCooldownRemaining(keyHealth, entry.keyNumber);
-      if (keyCooldown) continue;
+      if (keyCooldown) {
+        skippedForCooldown = true;
+        continue;
+      }
       attemptedAnyKey = true;
 
       const attemptStarted = Date.now();
@@ -516,10 +524,13 @@ async function generateWithFallback(contents) {
         const status = getErrorStatus(error) || "unknown";
         console.error(`[HAHARI AI] ${model}, key ${entry.keyNumber} failed (${status}) after ${Date.now() - attemptStarted}ms: ${error?.message || error}`);
 
+        // A 503 with Google's high-demand message is model-wide. Trying the
+        // remaining API keys against the same overloaded model wastes time.
         if (shouldTryAnotherModel(error)) {
-          modelHealth.set(model, Date.now() + MODEL_COOLDOWN_MS);
+          const cooldown = status === 404 ? MODEL_COOLDOWN_MS : MODEL_OVERLOAD_COOLDOWN_MS;
+          modelHealth.set(model, Date.now() + cooldown);
           modelUnavailable = true;
-          console.log(`[HAHARI AI] Model ${model} marked unavailable temporarily.`);
+          console.log(`[HAHARI AI] Model ${model} temporarily unavailable (${status}); switching to the next fallback model.`);
           break;
         }
 
@@ -530,8 +541,11 @@ async function generateWithFallback(contents) {
         throw error;
       }
     }
+
+    // If no key was usable for this model, keep checking other models. A model
+    // may already be marked unavailable while a different key remains usable.
     if (!modelUnavailable && keyOrder.every(entry => getCooldownRemaining(keyHealth, entry.keyNumber) > 0)) {
-      console.log(`[HAHARI AI] All keys are cooling down; checking next model only if a key becomes available.`);
+      skippedForCooldown = true;
     }
   }
 
@@ -540,9 +554,16 @@ async function generateWithFallback(contents) {
     const error = new Error("All configured Gemini API keys are temporarily cooling down. Please retry shortly.");
     error.status = 503;
     error.retryAfterMs = Number.isFinite(remaining) ? remaining : KEY_COOLDOWN_MS;
+    console.warn(`[HAHARI AI] No API keys were available; earliest key cooldown expires in ${Math.ceil(error.retryAfterMs / 1000)}s.`);
     throw error;
   }
-  throw lastError || new Error("All configured Gemini keys and fallback models are unavailable.");
+
+  if (lastError) throw lastError;
+  const error = new Error(skippedForCooldown
+    ? "All Gemini fallback models or API keys are temporarily cooling down. Please retry shortly."
+    : "All configured Gemini models are unavailable.");
+  error.status = 503;
+  throw error;
 }
 
 // =====================================================
@@ -626,7 +647,7 @@ async function generateAI({ question, image, userID, userName, threadID, isOwner
 // ROOT
 // =====================================================
 app.get("/", (req, res) => {
-  res.json({ success: true, service: "Hahari AI API", version: "4.1.0" });
+  res.json({ success: true, service: "Hahari AI API", version: "4.1.1" });
 });
 
 // =====================================================
@@ -709,6 +730,7 @@ app.post("/api/ai", async (req, res) => {
     return res.status(status >= 400 && status <= 599 ? status : 500).json({
       success: false,
       error: error?.message || "Failed to generate AI response.",
+      retryAfterMs: Number.isFinite(error?.retryAfterMs) ? error.retryAfterMs : undefined,
       responseTime: Date.now() - started
     });
   }
@@ -735,7 +757,7 @@ app.post("/api/ai/clear", async (req, res) => {
 // START SERVER
 // =====================================================
 app.listen(PORT, () => {
-  console.log(`🎀 Hahari AI API V4.1 running on port ${PORT}`);
+  console.log(`🎀 Hahari AI API V4.1.1 running on port ${PORT}`);
   console.log(`[HAHARI AI] Primary model: ${PRIMARY_MODEL}`);
   console.log(`[HAHARI AI] Fallback models: ${GEMINI_MODELS.join(", ")}`);
   console.log(`[HAHARI AI] Configured API keys: ${aiClients.length}`);
